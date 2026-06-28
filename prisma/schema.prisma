@@ -1,0 +1,124 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String   @id @default(uuid())
+  name          String
+  phone         String   @unique
+  password      String?
+  referralCode  String   @unique
+  uplineId      String?
+  upline        User?    @relation("Upline", fields: [uplineId], references: [id])
+  downlines     User[]   @relation("Upline")
+  feePaid       Boolean  @default(false)
+  feePaidAt     DateTime?
+  kycStatus     String   @default("pending")
+  panNumber     String?
+  aadhaarLast4  String?
+  bankAccount   String?
+  bankIfsc      String?
+  bankName      String?
+  role          String   @default("partner")
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  pointsWallet   PointsWallet?
+  earningsWallet EarningsWallet?
+  submissions    Submission[]
+  transactions   Transaction[]
+  withdrawals    Withdrawal[]
+  otps           OTP[]
+}
+
+model OTP {
+  id        String   @id @default(uuid())
+  phone     String
+  code      String
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id])
+  expiresAt DateTime
+  used      Boolean  @default(false)
+  createdAt DateTime @default(now())
+}
+
+model PointsWallet {
+  id        String   @id @default(uuid())
+  userId    String   @unique
+  user      User     @relation(fields: [userId], references: [id])
+  balance   Int      @default(0)
+  lifetime  Int      @default(0)
+  updatedAt DateTime @updatedAt
+}
+
+model EarningsWallet {
+  id        String   @id @default(uuid())
+  userId    String   @unique
+  user      User     @relation(fields: [userId], references: [id])
+  balance   Float    @default(0)
+  lifetime  Float    @default(0)
+  updatedAt DateTime @updatedAt
+}
+
+model Campaign {
+  id          String  @id @default(uuid())
+  name        String
+  type        String
+  pointsReq   Int
+  rewardAmt   Float
+  videoUrl    String?
+  descEn      String?
+  descHi      String?
+  descMr      String?
+  isActive    Boolean  @default(true)
+  sortOrder   Int      @default(0)
+  createdAt   DateTime @default(now())
+  submissions Submission[]
+}
+
+model Submission {
+  id            String    @id @default(uuid())
+  userId        String
+  user          User      @relation(fields: [userId], references: [id])
+  campaignId    String
+  campaign      Campaign  @relation(fields: [campaignId], references: [id])
+  screenshotUrl String?
+  recordingUrl  String?
+  remarks       String?
+  status        String    @default("pending")
+  reviewedBy    String?
+  reviewedAt    DateTime?
+  rejectReason  String?
+  submittedAt   DateTime  @default(now())
+}
+
+model Transaction {
+  id          String   @id @default(uuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id])
+  type        String
+  amount      Float    @default(0)
+  points      Int      @default(0)
+  referenceId String?
+  description String?
+  createdAt   DateTime @default(now())
+}
+
+model Withdrawal {
+  id           String    @id @default(uuid())
+  userId       String
+  user         User      @relation(fields: [userId], references: [id])
+  grossAmount  Float
+  adminCharge  Float
+  tdsDeduction Float
+  netAmount    Float
+  status       String    @default("pending")
+  razorpayId   String?
+  requestedAt  DateTime  @default(now())
+  paidAt       DateTime?
+}

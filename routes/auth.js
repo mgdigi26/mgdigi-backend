@@ -96,5 +96,30 @@ router.get('/me', async (req, res) => {
     res.status(401).json({ error: 'Invalid token' })
   }
 })
+// CHECK REFERRAL CODE
+router.post('/check-referral', async (req, res) => {
+  const { referralCode } = req.body
+  if (!referralCode) return res.status(400).json({ error: 'Required' })
+  const user = await prisma.user.findUnique({
+    where: { referralCode: referralCode.toUpperCase() },
+    select: { id: true, name: true, referralCode: true }
+  })
+  if (!user) return res.status(404).json({ error: 'Code not found' })
+  res.json({ user })
+})
 
+// UPDATE PROFILE
+router.post('/update-profile', async (req, res) => {
+  const token = req.headers.authorization?.split(' ')[1]
+  if (!token) return res.status(401).json({ error: 'Unauthorized' })
+  try {
+    const decoded = require('jsonwebtoken').verify(token, process.env.JWT_SECRET)
+    const { name } = req.body
+    const user = await prisma.user.update({
+      where: { id: decoded.userId },
+      data: { name: name || 'Partner' }
+    })
+    res.json({ success: true, user })
+  } catch { res.status(401).json({ error: 'Invalid token' }) }
+})
 module.exports = router

@@ -122,4 +122,36 @@ router.post('/update-profile', async (req, res) => {
     res.json({ success: true, user })
   } catch { res.status(401).json({ error: 'Invalid token' }) }
 })
+// CHECK REFERRAL CODE
+router.post('/check-referral', async (req, res) => {
+  try {
+    const { referralCode } = req.body
+    if (!referralCode) return res.status(400).json({ error: 'Required' })
+    const user = await prisma.user.findUnique({
+      where: { referralCode: referralCode.toUpperCase() },
+      select: { id: true, name: true, referralCode: true }
+    })
+    if (!user) return res.status(404).json({ error: 'Code not found' })
+    res.json({ user })
+  } catch(e) {
+    res.status(500).json({ error: 'Server error' })
+  }
+})
+
+// UPDATE PROFILE
+router.post('/update-profile', async (req, res) => {
+  try {
+    const token = req.headers.authorization?.split(' ')[1]
+    if (!token) return res.status(401).json({ error: 'Unauthorized' })
+    const decoded = require('jsonwebtoken').verify(token, process.env.JWT_SECRET)
+    const { name } = req.body
+    const user = await prisma.user.update({
+      where: { id: decoded.userId },
+      data: { name: name || 'Partner' }
+    })
+    res.json({ success: true, user })
+  } catch(e) {
+    res.status(500).json({ error: 'Server error' })
+  }
+})
 module.exports = router

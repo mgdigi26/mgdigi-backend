@@ -3,8 +3,9 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 model User {
@@ -32,8 +33,10 @@ model User {
   earningsWallet EarningsWallet?
   submissions    Submission[]
   transactions   Transaction[]
-  withdrawals    Withdrawal[]
-  otps           OTP[]
+  withdrawals     Withdrawal[]
+  otps            OTP[]
+  runCredits      RunCredit[]
+  campaignEnrollments CampaignEnrollment[]
 }
 
 model OTP {
@@ -121,4 +124,60 @@ model Withdrawal {
   razorpayId   String?
   requestedAt  DateTime  @default(now())
   paidAt       DateTime?
+}
+model RunCredit {
+  id          String   @id @default(uuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id])
+  tier        Int
+  amount      Float
+  used        Boolean  @default(false)
+  usedAt      DateTime?
+  submissionId String?
+  sourceUserId String
+  sourceLevel  Int
+  createdAt   DateTime @default(now())
+}
+
+model CampaignSchedule {
+  id              String   @id @default(uuid())
+  name            String
+  rewardAmt       Float
+  pointsReq       Int
+  durationDays    Int      @default(1)
+  uploadsPerDay   Int      @default(1)
+  videoUrl        String?
+  instagramUrl    String?
+  facebookUrl     String?
+  instructions    String?
+  isActive        Boolean  @default(true)
+  startDate       DateTime?
+  endDate         DateTime?
+  createdBy       String
+  createdAt       DateTime @default(now())
+
+  enrollments     CampaignEnrollment[]
+}
+
+model CampaignEnrollment {
+  id           String   @id @default(uuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id])
+  scheduleId   String
+  schedule     CampaignSchedule @relation(fields: [scheduleId], references: [id])
+  dayNumber    Int
+  screenshotUrl String?
+  status       String   @default("pending")
+  submittedAt  DateTime @default(now())
+  reviewedAt   DateTime?
+}
+
+model ActivityFeed {
+  id          String   @id @default(uuid())
+  type        String
+  userId      String?
+  userName    String?
+  description String
+  amount      Float?
+  createdAt   DateTime @default(now())
 }

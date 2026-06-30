@@ -1,157 +1,158 @@
-const express = require('express')
-const router = express.Router()
-const { PrismaClient } = require('@prisma/client')
-const jwt = require('jsonwebtoken')
-const prisma = new PrismaClient()
+const express = require("express");
+const router = express.Router();
+const { PrismaClient } = require("@prisma/client");
+const jwt = require("jsonwebtoken");
+const prisma = new PrismaClient();
 
-// Generate 6 digit OTP
+const LEVEL_CREDITS = [100, 20, 15, 15, 20, 30, 50];
+
 function generateOTP() {
-  return Math.floor(100000 + Math.random() * 900000).toString()
+  return Math.floor(100000 + Math.random() * 900000).toString();
 }
 
-// Generate unique referral code
 function generateReferralCode() {
-  return 'P-' + Math.random().toString(36).substring(2, 6).toUpperCase()
+  return "P-" + Math.random().toString(36).substring(2, 6).toUpperCase();
 }
 
-// SEND OTP
-router.post('/send-otp', async (req, res) => {
-  const { phone } = req.body
-  if (!phone) return res.status(400).json({ error: 'Phone required' })
+router.post("/send-otp", async (req, res) => {
+  try {
+    const { phone } = req.body;
+    if (!phone) return res.status(400).json({ error: "Phone required" });
+    const code = generateOTP();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+    await prisma.oTP.create({ data: { phone, code, expiresAt } });
+    console.log(`OTP for ${phone}: ${code}`);
+    res.json({ success: true, message: "OTP sent", otp: code });
+  } catch (e) {
+    res.status(500).json({ error: "Server error" });
+  }
+});
 
-  const code = generateOTP()
-  const expiresAt = new Date(Date.now() + 10 * 60 * 1000) // 10 mins
+router.post("/verify-otp", async (req, res) => {
+  try {
+    const { phone, code, name, referralCode } = req.body;
+    const otp = await prisma.oTP.findFirst({
+      where: { phone, code, used: false, expiresAt: { gt: new Date() } },
+      orderBy: { createdAt: "desc" },
+    });
+    if (!otp) return res.status(400).json({ error: "Invalid or expired OTP" });
+    await prisma.oTP.update({ where: { id: otp.id }, data: { used: true } });
 
-  await prisma.oTP.create({
-    data: { phone, code, expiresAt }
-  })
+    let user = await prisma.user.findUnique({ where: { phone } });
 
-  // In production replace with MSG91
-  console.log(`OTP for ${phone}: ${code}`)
+    if (!user) {
+      let uplineId = null;
+      if (referralCode) {
+        const upline = await prisma.user.findUnique({
+          where: { referralCode: referralCode.toUpperCase() },
+        });
+        if (upline) uplineId = upline.id;
+      }
 
-  res.json({ success: true, message: 'OTP sent', otp: code }) // Remove otp in production
-})
+      user = await prisma.user.create({
+        data: {
+          name: name || "Partner",
+          phone,
+          referralCode: generateReferralCode(),
+          uplineId,
+          pointsWallet: { create: { balance: 0, lifetime: 0 } },
+          earningsWallet: { create: { balance: 0, lifetime: 0 } },
+        },
+      });
 
-// VERIFY OTP + LOGIN or REGISTER
-router.post('/verify-otp', async (req, res) => {
-  const { phone, code, name, referralCode } = req.body
+      // Walk 7 levels up and add run-credits to each upline
+      let currentUser = user;
+      for (let level = 0; level < 7; level++) {
+        const current = await prisma.user.findUnique({
+          where: { id: currentUser.id },
+        });
+        if (!current?.uplineId) break;
 
-  const otp = await prisma.oTP.findFirst({
-    where: { phone, code, used: false, expiresAt: { gt: new Date() } },
-    orderBy: { createdAt: 'desc' }
-  })
+        await prisma.runCredit.create({
+          data: {
+            userId: current.uplineId,
+            tier: level + 1,
+            amount: LEVEL_CREDITS[level],
+            sourceUserId: user.id,
+            sourceLevel: level + 1,
+          },
+        });
 
-  if (!otp) return res.status(400).json({ error: 'Invalid or expired OTP' })
+        const uplineUser = await prisma.user.findUnique({
+          where: { id: current.uplineId },
+        });
+        if (!uplineUser) break;
+        currentUser = uplineUser;
+      }
 
-  // Mark OTP as used
-  await prisma.oTP.update({ where: { id: otp.id }, data: { used: true } })
-
-  // Check if user exists
-  let user = await prisma.user.findUnique({ where: { phone } })
-
-  if (!user) {
-    // Find upline if referral code provided
-    let uplineId = null
-    if (referralCode) {
-      const upline = await prisma.user.findUnique({ where: { referralCode } })
-      if (upline) uplineId = upline.id
+      // Log join to activity feed
+      await prisma.activityFeed.create({
+        data: {
+          type: "join",
+          userId: user.id,
+          userName: user.name || "New Partner",
+          description: `${user.name || "New Partner"} joined MGdigi`,
+          amount: null,
+        },
+      });
     }
 
-    // Create new user
-    user = await prisma.user.create({
-      data: {
-        name: name || 'Partner',
-        phone,
-        referralCode: generateReferralCode(),
-        uplineId,
-        pointsWallet: { create: { balance: 0, lifetime: 0 } },
-        earningsWallet: { create: { balance: 0, lifetime: 0 } }
-      },
-      include: { pointsWallet: true, earningsWallet: true }
-    })
+    const token = jwt.sign(
+      { userId: user.id, role: user.role },
+      process.env.JWT_SECRET,
+      { expiresIn: "30d" },
+    );
+    res.json({ success: true, token, user });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Server error" });
   }
+});
 
-  const token = jwt.sign(
-    { userId: user.id, role: user.role },
-    process.env.JWT_SECRET,
-    { expiresIn: '30d' }
-  )
-
-  res.json({ success: true, token, user })
-})
-
-// GET PROFILE
-router.get('/me', async (req, res) => {
-  const token = req.headers.authorization?.split(' ')[1]
-  if (!token) return res.status(401).json({ error: 'Unauthorized' })
-
+router.get("/me", async (req, res) => {
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET)
+    const token = req.headers.authorization?.split(" ")[1];
+    if (!token) return res.status(401).json({ error: "Unauthorized" });
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
     const user = await prisma.user.findUnique({
       where: { id: decoded.userId },
-      include: { pointsWallet: true, earningsWallet: true }
-    })
-    res.json(user)
+      include: { pointsWallet: true, earningsWallet: true },
+    });
+    res.json(user);
   } catch {
-    res.status(401).json({ error: 'Invalid token' })
+    res.status(401).json({ error: "Invalid token" });
   }
-})
-// CHECK REFERRAL CODE
-router.post('/check-referral', async (req, res) => {
-  const { referralCode } = req.body
-  if (!referralCode) return res.status(400).json({ error: 'Required' })
-  const user = await prisma.user.findUnique({
-    where: { referralCode: referralCode.toUpperCase() },
-    select: { id: true, name: true, referralCode: true }
-  })
-  if (!user) return res.status(404).json({ error: 'Code not found' })
-  res.json({ user })
-})
+});
 
-// UPDATE PROFILE
-router.post('/update-profile', async (req, res) => {
-  const token = req.headers.authorization?.split(' ')[1]
-  if (!token) return res.status(401).json({ error: 'Unauthorized' })
+router.post("/check-referral", async (req, res) => {
   try {
-    const decoded = require('jsonwebtoken').verify(token, process.env.JWT_SECRET)
-    const { name } = req.body
-    const user = await prisma.user.update({
-      where: { id: decoded.userId },
-      data: { name: name || 'Partner' }
-    })
-    res.json({ success: true, user })
-  } catch { res.status(401).json({ error: 'Invalid token' }) }
-})
-// CHECK REFERRAL CODE
-router.post('/check-referral', async (req, res) => {
-  try {
-    const { referralCode } = req.body
-    if (!referralCode) return res.status(400).json({ error: 'Required' })
+    const { referralCode } = req.body;
+    if (!referralCode) return res.status(400).json({ error: "Required" });
     const user = await prisma.user.findUnique({
       where: { referralCode: referralCode.toUpperCase() },
-      select: { id: true, name: true, referralCode: true }
-    })
-    if (!user) return res.status(404).json({ error: 'Code not found' })
-    res.json({ user })
-  } catch(e) {
-    res.status(500).json({ error: 'Server error' })
+      select: { id: true, name: true, referralCode: true },
+    });
+    if (!user) return res.status(404).json({ error: "Code not found" });
+    res.json({ user });
+  } catch (e) {
+    res.status(500).json({ error: "Server error" });
   }
-})
+});
 
-// UPDATE PROFILE
-router.post('/update-profile', async (req, res) => {
+router.post("/update-profile", async (req, res) => {
   try {
-    const token = req.headers.authorization?.split(' ')[1]
-    if (!token) return res.status(401).json({ error: 'Unauthorized' })
-    const decoded = require('jsonwebtoken').verify(token, process.env.JWT_SECRET)
-    const { name } = req.body
+    const token = req.headers.authorization?.split(" ")[1];
+    if (!token) return res.status(401).json({ error: "Unauthorized" });
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const { name } = req.body;
     const user = await prisma.user.update({
       where: { id: decoded.userId },
-      data: { name: name || 'Partner' }
-    })
-    res.json({ success: true, user })
-  } catch(e) {
-    res.status(500).json({ error: 'Server error' })
+      data: { name: name || "Partner" },
+    });
+    res.json({ success: true, user });
+  } catch (e) {
+    res.status(500).json({ error: "Server error" });
   }
-})
-module.exports = router
+});
+
+module.exports = router;

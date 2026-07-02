@@ -26,6 +26,8 @@ model User {
   bankIfsc      String?
   bankName      String?
   role          String   @default("partner")
+  status      String   @default("active")
+  warnings    Int      @default(0)
   isActive      Boolean  @default(true)
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt

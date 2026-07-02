@@ -144,5 +144,100 @@ router.post('/withdrawals/:id/approve', auth, async (req, res) => {
 
   res.json({ success: true })
 })
+// ── GET SINGLE USER ───────────────────────────────────────────
+router.get('/users/:id', auth, async (req, res) => {
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: req.params.id },
+      include: {
+        pointsWallet: true,
+        earningsWallet: true,
+        submissions: { orderBy: { submittedAt: 'desc' }, take: 10,
+          include: { campaign: true } },
+        withdrawals: { orderBy: { requestedAt: 'desc' }, take: 5 },
+        _count: { select: { submissions: true } }
+      }
+    })
+    if (!user) return res.status(404).json({ error: 'User not found' })
+    const downlineCount = await prisma.user.count({ where: { uplineId: user.id } })
+    res.json({ ...user, downlineCount })
+  } catch (e) {
+    console.error(e)
+    res.status(500).json({ error: 'Server error' })
+  }
+})
+
+// ── SUSPEND USER ──────────────────────────────────────────────
+router.patch('/users/:id/suspend', auth, async (req, res) => {
+  try {
+    if (req.params.id === req.user.userId) {
+      return res.status(400).json({ error: 'Cannot suspend yourself' })
+    }
+    const user = await prisma.user.update({
+      where: { id: req.params.id },
+      data: { status: 'suspended' }
+    })
+    await prisma.activityFeed.create({
+      data: {
+        type: 'suspension',
+        userId: user.id,
+        userName: user.name || 'Partner',
+        description: `${user.name || 'Partner'} account suspended by admin`,
+        amount: null
+      }
+    })
+    res.json({ success: true, user })
+  } catch (e) {
+    console.error(e)
+    res.status(500).json({ error: 'Server error' })
+  }
+})
+
+// ── ACTIVATE USER ─────────────────────────────────────────────
+router.patch('/users/:id/activate', auth, async (req, res) => {
+  try {
+    const user = await prisma.user.update({
+      where: { id: req.params.id },
+      data: { status: 'active' }
+    })
+    await prisma.activityFeed.create({
+      data: {
+        type: 'activation',
+        userId: user.id,
+        userName: user.name || 'Partner',
+        description: `${user.name || 'Partner'} account reactivated by admin`,
+        amount: null
+      }
+    })
+    res.json({ success: true, user })
+  } catch (e) {
+    console.error(e)
+    res.status(500).json({ error: 'Server error' })
+  }
+})
+
+// ── SEND WARNING ──────────────────────────────────────────────
+router.post('/users/:id/warning', auth, async (req, res) => {
+  try {
+    const { reason } = req.body
+    const user = await prisma.user.update({
+      where: { id: req.params.id },
+      data: { warnings: { increment: 1 } }
+    })
+    await prisma.activityFeed.create({
+      data: {
+        type: 'warning',
+        userId: user.id,
+        userName: user.name || 'Partner',
+        description: `Warning issued to ${user.name || 'Partner'}${reason ? ': ' + reason : ''}`,
+        amount: null
+      }
+    })
+    res.json({ success: true, warnings: user.warnings })
+  } catch (e) {
+    console.error(e)
+    res.status(500).json({ error: 'Server error' })
+  }
+})
 
 module.exports = router

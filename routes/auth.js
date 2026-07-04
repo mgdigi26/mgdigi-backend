@@ -122,14 +122,25 @@ router.post("/verify-otp", async (req, res) => {
       });
     }
 
+    // Update lastLoginAt for returning users (new users already have it as null)
+    const updatedUser = await prisma.user.update({
+      where: { id: user.id },
+      data: { lastLoginAt: new Date() },
+    });
+
     const token = jwt.sign(
-      { userId: user.id, role: user.role },
+      { userId: updatedUser.id, role: updatedUser.role },
       process.env.JWT_SECRET,
       { expiresIn: "30d" },
     );
 
     // Include hasPassword so frontend knows whether to show password setup
-    res.json({ success: true, token, user, hasPassword: !!user.password });
+    res.json({
+      success: true,
+      token,
+      user: updatedUser,
+      hasPassword: !!updatedUser.password,
+    });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Server error" });
@@ -137,13 +148,40 @@ router.post("/verify-otp", async (req, res) => {
 });
 
 // ── GET PROFILE ───────────────────────────────────────────────
+// Returns only safe, non-sensitive profile fields required by the frontend.
+// Sensitive fields (password, pan, aadhaar, bank, razorpay) excluded.
 router.get("/me", async (req, res) => {
   try {
     const decoded = verifyToken(req);
     if (!decoded) return res.status(401).json({ error: "Unauthorized" });
     const user = await prisma.user.findUnique({
       where: { id: decoded.userId },
-      include: { pointsWallet: true, earningsWallet: true },
+      select: {
+        id: true,
+        name: true,
+        phone: true,
+        referralCode: true,
+        role: true,
+        isActive: true,
+        email: true,
+        dob: true,
+        address1: true,
+        address2: true,
+        city: true,
+        state: true,
+        pincode: true,
+        country: true,
+        profilePhoto: true,
+        membershipStatus: true,
+        feePaid: true,
+        feePaidAt: true,
+        kycStatus: true,
+        lastLoginAt: true,
+        createdAt: true,
+        updatedAt: true,
+        pointsWallet: true,
+        earningsWallet: true,
+      },
     });
     res.json(user);
   } catch {
@@ -168,35 +206,39 @@ router.post("/check-referral", async (req, res) => {
 });
 
 // ── UPDATE PROFILE ────────────────────────────────────────────
+// Saves all supported profile fields. All fields optional — only
+// provided fields are written. feePaid logic unchanged.
 router.post("/update-profile", async (req, res) => {
   try {
     const decoded = verifyToken(req);
     if (!decoded) return res.status(401).json({ error: "Unauthorized" });
 
-    console.log("[update-profile] body:", JSON.stringify(req.body));
+    const {
+      name,
+      email,
+      dob,
+      address1,
+      address2,
+      city,
+      state,
+      pincode,
+      country,
+      profilePhoto,
+    } = req.body;
 
-    const { name, email, city, state, dob, address1, address2, pincode } =
-      req.body;
-
-    // Only include fields that exist in the Prisma User schema.
-    // email, city, state, dob, address1, address2, pincode are NOT columns
-    // in the current User model — passing them to Prisma throws P2009.
     const updateData = {};
     if (name && name.trim()) updateData.name = name.trim();
+    if (email !== undefined) updateData.email = email || null;
+    if (dob !== undefined) updateData.dob = dob ? new Date(dob) : null;
+    if (address1 !== undefined) updateData.address1 = address1 || null;
+    if (address2 !== undefined) updateData.address2 = address2 || null;
+    if (city !== undefined) updateData.city = city || null;
+    if (state !== undefined) updateData.state = state || null;
+    if (pincode !== undefined) updateData.pincode = pincode || null;
+    if (country !== undefined) updateData.country = country || null;
+    if (profilePhoto !== undefined)
+      updateData.profilePhoto = profilePhoto || null;
 
-    // Log skipped fields for Railway visibility
-    const skipped = { email, city, state, dob, address1, address2, pincode };
-    const skippedKeys = Object.entries(skipped)
-      .filter(([, v]) => v !== undefined && v !== null && v !== "")
-      .map(([k]) => k);
-    if (skippedKeys.length) {
-      console.log(
-        "[update-profile] fields not yet in schema (ignored):",
-        skippedKeys,
-      );
-    }
-
-    // Nothing schema-supported to update — return current user (idempotent)
     if (!Object.keys(updateData).length) {
       const user = await prisma.user.findUnique({
         where: { id: decoded.userId },
@@ -208,13 +250,10 @@ router.post("/update-profile", async (req, res) => {
       where: { id: decoded.userId },
       data: updateData,
     });
-
     res.json({ success: true, user });
   } catch (e) {
     console.error("[update-profile] ERROR:", e.message);
-    console.error("[update-profile] Prisma code:", e.code);
-    console.error("[update-profile] Prisma meta:", JSON.stringify(e.meta));
-    res.status(500).json({ error: "Server error", detail: e.message });
+    res.status(500).json({ error: "Server error" });
   }
 });
 
@@ -261,6 +300,11 @@ router.post("/login-password", async (req, res) => {
         .status(401)
         .json({ error: "Invalid mobile number or password" });
     }
+
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { lastLoginAt: new Date() },
+    });
 
     const token = jwt.sign(
       { userId: user.id, role: user.role },

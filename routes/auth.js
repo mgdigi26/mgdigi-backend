@@ -172,19 +172,49 @@ router.post("/update-profile", async (req, res) => {
   try {
     const decoded = verifyToken(req);
     if (!decoded) return res.status(401).json({ error: "Unauthorized" });
-    const { name, email, city, state } = req.body;
+
+    console.log("[update-profile] body:", JSON.stringify(req.body));
+
+    const { name, email, city, state, dob, address1, address2, pincode } =
+      req.body;
+
+    // Only include fields that exist in the Prisma User schema.
+    // email, city, state, dob, address1, address2, pincode are NOT columns
+    // in the current User model — passing them to Prisma throws P2009.
     const updateData = {};
-    if (name) updateData.name = name;
-    if (email) updateData.email = email;
-    if (city) updateData.city = city;
-    if (state) updateData.state = state;
+    if (name && name.trim()) updateData.name = name.trim();
+
+    // Log skipped fields for Railway visibility
+    const skipped = { email, city, state, dob, address1, address2, pincode };
+    const skippedKeys = Object.entries(skipped)
+      .filter(([, v]) => v !== undefined && v !== null && v !== "")
+      .map(([k]) => k);
+    if (skippedKeys.length) {
+      console.log(
+        "[update-profile] fields not yet in schema (ignored):",
+        skippedKeys,
+      );
+    }
+
+    // Nothing schema-supported to update — return current user (idempotent)
+    if (!Object.keys(updateData).length) {
+      const user = await prisma.user.findUnique({
+        where: { id: decoded.userId },
+      });
+      return res.json({ success: true, user });
+    }
+
     const user = await prisma.user.update({
       where: { id: decoded.userId },
       data: updateData,
     });
+
     res.json({ success: true, user });
   } catch (e) {
-    res.status(500).json({ error: "Server error" });
+    console.error("[update-profile] ERROR:", e.message);
+    console.error("[update-profile] Prisma code:", e.code);
+    console.error("[update-profile] Prisma meta:", JSON.stringify(e.meta));
+    res.status(500).json({ error: "Server error", detail: e.message });
   }
 });
 

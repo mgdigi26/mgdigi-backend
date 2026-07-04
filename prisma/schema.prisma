@@ -3,8 +3,9 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 model User {
@@ -18,7 +19,7 @@ model User {
   city          String?
   state         String?
   pincode       String?
-  country       String?   @default("India")
+  country       String?  @default("India")
   profilePhoto  String?
   password      String?
   referralCode  String   @unique
@@ -26,29 +27,32 @@ model User {
   upline        User?    @relation("Upline", fields: [uplineId], references: [id])
   downlines     User[]   @relation("Upline")
   feePaid       Boolean  @default(false)
-  feePaidAt         DateTime?
-  membershipStatus  String?   @default("inactive")
+  feePaidAt     DateTime?
+  membershipStatus  String?  @default("inactive")
   razorpayOrderId   String?
   razorpayPaymentId String?
-  kycStatus         String   @default("pending")
+  kycStatus     String   @default("pending")
   panNumber     String?
   aadhaarLast4  String?
   bankAccount   String?
   bankIfsc      String?
-  bankName           String?
-  accountHolderName  String?
-  role               String   @default("partner")
+  bankName      String?
+  accountHolderName String?
+  role          String   @default("partner")
+  status        String   @default("active")
+  warnings      Int      @default(0)
   isActive      Boolean  @default(true)
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
   lastLoginAt   DateTime?
-
-  pointsWallet    PointsWallet?
-  earningsWallet  EarningsWallet?
-  submissions     Submission[]
-  transactions    Transaction[]
+  pointsWallet   PointsWallet?
+  earningsWallet EarningsWallet?
+  submissions    Submission[]
+  transactions   Transaction[]
   withdrawals     Withdrawal[]
   otps            OTP[]
+  runCredits      RunCredit[]
+  campaignEnrollments CampaignEnrollment[]
 }
 
 model OTP {
@@ -81,36 +85,35 @@ model EarningsWallet {
 }
 
 model Campaign {
-  id            String   @id @default(uuid())
-  name          String
-  type          String
-  pointsReq     Int
-  rewardAmt     Float
-  videoUrl      String?
-  descEn        String?
-  descHi        String?
-  descMr        String?
-  isActive      Boolean  @default(true)
-  sortOrder     Int      @default(0)
-  createdAt     DateTime @default(now())
-
-  submissions   Submission[]
+  id          String  @id @default(uuid())
+  name        String
+  type        String
+  pointsReq   Int
+  rewardAmt   Float
+  videoUrl    String?
+  descEn      String?
+  descHi      String?
+  descMr      String?
+  isActive    Boolean  @default(true)
+  sortOrder   Int      @default(0)
+  createdAt   DateTime @default(now())
+  submissions Submission[]
 }
 
 model Submission {
-  id             String    @id @default(uuid())
-  userId         String
-  user           User      @relation(fields: [userId], references: [id])
-  campaignId     String
-  campaign       Campaign  @relation(fields: [campaignId], references: [id])
-  screenshotUrl  String?
-  recordingUrl   String?
-  remarks        String?
-  status         String    @default("pending")
-  reviewedBy     String?
-  reviewedAt     DateTime?
-  rejectReason   String?
-  submittedAt    DateTime  @default(now())
+  id            String    @id @default(uuid())
+  userId        String
+  user          User      @relation(fields: [userId], references: [id])
+  campaignId    String
+  campaign      Campaign  @relation(fields: [campaignId], references: [id])
+  screenshotUrl String?
+  recordingUrl  String?
+  remarks       String?
+  status        String    @default("pending")
+  reviewedBy    String?
+  reviewedAt    DateTime?
+  rejectReason  String?
+  submittedAt   DateTime  @default(now())
 }
 
 model Transaction {
@@ -126,15 +129,74 @@ model Transaction {
 }
 
 model Withdrawal {
-  id            String    @id @default(uuid())
+  id           String    @id @default(uuid())
+  userId       String
+  user         User      @relation(fields: [userId], references: [id])
+  grossAmount  Float
+  adminCharge  Float
+  tdsDeduction Float
+  netAmount    Float
+  status       String    @default("pending")
+  razorpayId   String?
+  requestedAt  DateTime  @default(now())
+  paidAt       DateTime?
+}
+
+model RunCredit {
+  id           String    @id @default(uuid())
+  userId       String
+  user         User      @relation(fields: [userId], references: [id])
+  tier         Int
+  amount       Float
+  used         Boolean   @default(false)
+  usedAt       DateTime?
+  submissionId String?
+  sourceUserId String
+  sourceLevel  Int
+  createdAt    DateTime  @default(now())
+}
+
+model CampaignSchedule {
+  id              String   @id @default(uuid())
+  name            String
+  type            String?
+  description     String?
+  rewardAmt       Float
+  pointsReq       Int
+  durationDays    Int      @default(1)
+  uploadsPerDay   Int      @default(1)
+  videoUrl        String?
+  instagramUrl    String?
+  facebookUrl     String?
+  instructions    String?
+  isActive        Boolean  @default(true)
+  startDate       DateTime?
+  endDate         DateTime?
+  createdBy       String
+  createdAt       DateTime @default(now())
+
+  enrollments     CampaignEnrollment[]
+}
+
+model CampaignEnrollment {
+  id            String   @id @default(uuid())
   userId        String
-  user          User      @relation(fields: [userId], references: [id])
-  grossAmount   Float
-  adminCharge   Float
-  tdsDeduction  Float
-  netAmount     Float
-  status        String    @default("pending")
-  razorpayId    String?
-  requestedAt   DateTime  @default(now())
-  paidAt        DateTime?
+  user          User     @relation(fields: [userId], references: [id])
+  scheduleId    String
+  schedule      CampaignSchedule @relation(fields: [scheduleId], references: [id])
+  dayNumber     Int
+  screenshotUrl String?
+  status        String   @default("pending")
+  submittedAt   DateTime @default(now())
+  reviewedAt    DateTime?
+}
+
+model ActivityFeed {
+  id          String   @id @default(uuid())
+  type        String
+  userId      String?
+  userName    String?
+  description String
+  amount      Float?
+  createdAt   DateTime @default(now())
 }

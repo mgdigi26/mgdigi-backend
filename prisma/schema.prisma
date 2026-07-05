@@ -179,16 +179,18 @@ model CampaignSchedule {
 }
 
 model CampaignEnrollment {
-  id            String   @id @default(uuid())
+  id            String    @id @default(uuid())
   userId        String
-  user          User     @relation(fields: [userId], references: [id])
+  user          User      @relation(fields: [userId], references: [id])
   scheduleId    String
   schedule      CampaignSchedule @relation(fields: [scheduleId], references: [id])
   dayNumber     Int
   screenshotUrl String?
-  status        String   @default("pending")
-  submittedAt   DateTime @default(now())
+  status        String    @default("pending")
+  joinedAt      DateTime?
+  submittedAt   DateTime?
   reviewedAt    DateTime?
+  rejectReason  String?
 }
 
 model ActivityFeed {

@@ -202,3 +202,10 @@ model ActivityFeed {
   amount      Float?
   createdAt   DateTime @default(now())
 }
+
+model AppSetting {
+  id        String   @id @default(uuid())
+  key       String   @unique
+  value     String
+  updatedAt DateTime @updatedAt
+}

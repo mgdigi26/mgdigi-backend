@@ -78,6 +78,54 @@ router.post('/verify-otp', async (req, res) => {
         }
       })
 
+      // ── MARKETING POINTS: credit upline immediately on registration ─────
+      // Walk 7 upline levels and increment PointsWallet.balance + lifetime.
+      // Idempotency: skip if a Transaction (type=referral_join, referenceId=user.id)
+      // already exists for this upline — prevents double-credit on retries.
+      // RunCredit creation (below) is completely unchanged.
+      let mpCurrentUser = user
+      for (let mpLevel = 0; mpLevel < 7; mpLevel++) {
+        const mpCurrent = await prisma.user.findUnique({ where: { id: mpCurrentUser.id } })
+        if (!mpCurrent?.uplineId) break
+
+        const mpPoints = LEVEL_CREDITS[mpLevel]
+
+        // Idempotency check — one reward per registration per upline level
+        const alreadyRewarded = await prisma.transaction.findFirst({
+          where: {
+            userId:      mpCurrent.uplineId,
+            type:        'referral_join',
+            referenceId: user.id,
+          }
+        })
+
+        if (!alreadyRewarded) {
+          // Wallet update + audit transaction are atomic — either both succeed or both roll back.
+          // This prevents partial writes (wallet credited without a transaction record, or vice versa).
+          await prisma.$transaction([
+            prisma.pointsWallet.update({
+              where: { userId: mpCurrent.uplineId },
+              data:  { balance: { increment: mpPoints }, lifetime: { increment: mpPoints } }
+            }),
+            prisma.transaction.create({
+              data: {
+                userId:      mpCurrent.uplineId,
+                type:        'referral_join',
+                referenceId: user.id,
+                amount:      0,
+                points:      mpPoints,
+                description: `Referral bonus — ${user.name || 'New Partner'} joined (Level ${mpLevel + 1})`,
+              }
+            })
+          ])
+        }
+
+        const mpUpline = await prisma.user.findUnique({ where: { id: mpCurrent.uplineId } })
+        if (!mpUpline) break
+        mpCurrentUser = mpUpline
+      }
+      // ── END Marketing Points block ────────────────────────────────────
+
       // Walk upline 7 levels and credit run-credits
       let currentUser = user
       for (let level = 0; level < 7; level++) {

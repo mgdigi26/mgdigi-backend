@@ -21,6 +21,9 @@ app.use("/api/admin", require("./routes/admin"));
 app.use("/api/activity", require("./routes/activity"));
 app.use("/api/schedule", require("./routes/schedule"));
 
+const uploadRouter = require("./routes/upload");
+app.use("/api", uploadRouter);
+
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`MGdigi backend running on port ${PORT}`);

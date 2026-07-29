@@ -165,6 +165,7 @@ model CampaignSchedule {
   pointsReq       Int
   durationDays    Int      @default(1)
   uploadsPerDay   Int      @default(1)
+  imageUrl        String?
   videoUrl        String?
   instagramUrl    String?
   facebookUrl     String?

@@ -1,55 +1,27 @@
 /**
  * routes/upload.js — Supabase Storage upload endpoints
  *
- * Provides two signed upload endpoints:
- *   POST /upload/campaign-media   → campaign images and videos (admin only)
- *   POST /upload/proof            → proof screenshots (partner only)
+ * POST /upload/campaign-media  — admin: upload campaign images/videos
+ * POST /upload/proof           — partner: upload proof screenshots
  *
- * Both endpoints:
- *   - Accept multipart/form-data with a single `file` field
- *   - Upload to the appropriate Supabase Storage bucket
- *   - Return a public URL
- *
- * Buckets required in Supabase Storage:
- *   campaign-media   — public read, authenticated write
- *   proof-uploads    — authenticated read + write
- *
- * Registration in index.js:
+ * Register in index.js:
  *   const uploadRouter = require('./routes/upload')
  *   app.use('/api', uploadRouter)
- *
- * Dependencies:
- *   npm install @supabase/supabase-js multer
  */
 
 const express    = require('express')
 const router     = express.Router()
-const multer     = require('multer')
 const jwt        = require('jsonwebtoken')
 const { createClient } = require('@supabase/supabase-js')
 const path       = require('path')
 
-// ── Supabase client (service-role key for server-side uploads) ─
+// ── Supabase client ───────────────────────────────────────────
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY   // service-role bypasses RLS for uploads
+  process.env.SUPABASE_SERVICE_ROLE_KEY
 )
 
-// ── Multer: memory storage (no disk writes on server) ─────────
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits:  { fileSize: 50 * 1024 * 1024 }, // 50 MB max
-  fileFilter(req, file, cb) {
-    const allowed = ['image/jpeg', 'image/png', 'image/webp', 'video/mp4', 'video/webm', 'video/quicktime']
-    if (allowed.includes(file.mimetype)) {
-      cb(null, true)
-    } else {
-      cb(new Error('Unsupported file type. Allowed: JPEG, PNG, WebP, MP4, WebM, MOV'))
-    }
-  }
-})
-
-// ── Auth helpers ───────────────────────────────────────────────
+// ── Auth helpers ──────────────────────────────────────────────
 function auth(req, res, next) {
   const token = req.headers.authorization?.split(' ')[1]
   if (!token) return res.status(401).json({ error: 'Unauthorized' })
@@ -73,34 +45,94 @@ function adminAuth(req, res, next) {
   }
 }
 
-// ── Unique filename generator ──────────────────────────────────
+// ── Raw body parser for file uploads ─────────────────────────
+// Uses Node.js built-in — no multer dependency needed
+const { Readable } = require('stream')
+
+function parseMultipart(req) {
+  return new Promise((resolve, reject) => {
+    const boundary = req.headers['content-type']?.split('boundary=')[1]
+    if (!boundary) return reject(new Error('No boundary in content-type'))
+
+    const chunks = []
+    req.on('data', chunk => chunks.push(chunk))
+    req.on('end', () => {
+      try {
+        const body      = Buffer.concat(chunks)
+        const delimiter = Buffer.from(`--${boundary}`)
+        const parts     = []
+        let start       = body.indexOf(delimiter) + delimiter.length + 2 // skip \r\n
+
+        while (true) {
+          const next = body.indexOf(delimiter, start)
+          if (next === -1) break
+
+          const part   = body.slice(start, next - 2) // trim \r\n before delimiter
+          const sepIdx = part.indexOf('\r\n\r\n')
+          if (sepIdx === -1) { start = next + delimiter.length + 2; continue }
+
+          const headerStr = part.slice(0, sepIdx).toString()
+          const fileData  = part.slice(sepIdx + 4)
+
+          const nameMatch = headerStr.match(/name="([^"]+)"/)
+          const fileMatch = headerStr.match(/filename="([^"]+)"/)
+          const typeMatch = headerStr.match(/Content-Type:\s*([^\r\n]+)/i)
+
+          parts.push({
+            name:        nameMatch?.[1] || '',
+            filename:    fileMatch?.[1] || '',
+            contentType: typeMatch?.[1]?.trim() || 'application/octet-stream',
+            data:        fileData,
+          })
+
+          start = next + delimiter.length + 2
+        }
+
+        resolve(parts)
+      } catch (e) {
+        reject(e)
+      }
+    })
+    req.on('error', reject)
+  })
+}
+
+// ── Unique filename ───────────────────────────────────────────
 function uniqueFilename(originalName) {
-  const ext  = path.extname(originalName).toLowerCase()
+  const ext  = path.extname(originalName || 'file').toLowerCase()
   const ts   = Date.now()
   const rand = Math.random().toString(36).slice(2, 8)
   return `${ts}-${rand}${ext}`
 }
 
-// ── POST /upload/campaign-media ────────────────────────────────
-/**
- * Upload a campaign image or video (admin only).
- * Accepts:  multipart/form-data { file }
- * Returns:  { success: true, url: string, path: string }
- *
- * The returned `url` is a public URL suitable for storing in
- * CampaignSchedule.imageUrl or CampaignSchedule.videoUrl.
- */
-router.post('/upload/campaign-media', adminAuth, upload.single('file'), async (req, res) => {
+// ── POST /upload/campaign-media ───────────────────────────────
+router.post('/upload/campaign-media', adminAuth, async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ error: 'No file provided' })
+    const contentType = req.headers['content-type'] || ''
+    if (!contentType.includes('multipart/form-data')) {
+      return res.status(400).json({ error: 'Must be multipart/form-data' })
+    }
 
-    const filename    = uniqueFilename(req.file.originalname)
+    const parts = await parseMultipart(req)
+    const file  = parts.find(p => p.name === 'file' && p.filename)
+    if (!file) return res.status(400).json({ error: 'No file provided' })
+
+    const allowed = ['image/jpeg','image/png','image/webp','video/mp4','video/webm','video/quicktime']
+    if (!allowed.includes(file.contentType)) {
+      return res.status(400).json({ error: 'Unsupported file type' })
+    }
+
+    if (file.data.length > 50 * 1024 * 1024) {
+      return res.status(400).json({ error: 'File too large. Maximum 50MB.' })
+    }
+
+    const filename    = uniqueFilename(file.filename)
     const storagePath = `campaigns/${filename}`
 
     const { error: uploadError } = await supabase.storage
       .from('campaign-media')
-      .upload(storagePath, req.file.buffer, {
-        contentType:  req.file.mimetype,
+      .upload(storagePath, file.data, {
+        contentType:  file.contentType,
         cacheControl: '3600',
         upsert:       false,
       })
@@ -110,7 +142,6 @@ router.post('/upload/campaign-media', adminAuth, upload.single('file'), async (r
       return res.status(500).json({ error: 'Upload failed: ' + uploadError.message })
     }
 
-    // Get public URL (bucket must be public in Supabase dashboard)
     const { data } = supabase.storage
       .from('campaign-media')
       .getPublicUrl(storagePath)
@@ -118,38 +149,37 @@ router.post('/upload/campaign-media', adminAuth, upload.single('file'), async (r
     res.json({ success: true, url: data.publicUrl, path: storagePath })
   } catch (e) {
     console.error('[upload/campaign-media]', e)
-    res.status(500).json({ error: 'Server error' })
+    res.status(500).json({ error: 'Server error: ' + e.message })
   }
 })
 
-// ── POST /upload/proof ─────────────────────────────────────────
-/**
- * Upload a proof screenshot (partner only).
- * Accepts:  multipart/form-data { file }
- * Returns:  { success: true, url: string, path: string }
- *
- * The returned `url` should be stored in CampaignEnrollment.screenshotUrl
- * via the existing POST /schedule/:id/submit endpoint.
- *
- * Proof uploads are stored under proofs/{userId}/{filename} so each
- * partner's proofs are isolated by userId.
- */
-router.post('/upload/proof', auth, upload.single('file'), async (req, res) => {
+// ── POST /upload/proof ────────────────────────────────────────
+router.post('/upload/proof', auth, async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ error: 'No file provided' })
+    const contentType = req.headers['content-type'] || ''
+    if (!contentType.includes('multipart/form-data')) {
+      return res.status(400).json({ error: 'Must be multipart/form-data' })
+    }
 
-    // Only images accepted for proofs
-    if (!req.file.mimetype.startsWith('image/')) {
+    const parts = await parseMultipart(req)
+    const file  = parts.find(p => p.name === 'file' && p.filename)
+    if (!file) return res.status(400).json({ error: 'No file provided' })
+
+    if (!file.contentType.startsWith('image/')) {
       return res.status(400).json({ error: 'Proof must be an image file' })
     }
 
-    const filename    = uniqueFilename(req.file.originalname)
+    if (file.data.length > 10 * 1024 * 1024) {
+      return res.status(400).json({ error: 'File too large. Maximum 10MB.' })
+    }
+
+    const filename    = uniqueFilename(file.filename)
     const storagePath = `proofs/${req.user.userId}/${filename}`
 
     const { error: uploadError } = await supabase.storage
       .from('proof-uploads')
-      .upload(storagePath, req.file.buffer, {
-        contentType:  req.file.mimetype,
+      .upload(storagePath, file.data, {
+        contentType:  file.contentType,
         cacheControl: '3600',
         upsert:       false,
       })
@@ -159,10 +189,9 @@ router.post('/upload/proof', auth, upload.single('file'), async (req, res) => {
       return res.status(500).json({ error: 'Upload failed: ' + uploadError.message })
     }
 
-    // Signed URL (24-hour expiry) — proof-uploads bucket is private
     const { data, error: signError } = await supabase.storage
       .from('proof-uploads')
-      .createSignedUrl(storagePath, 60 * 60 * 24) // 24 hours
+      .createSignedUrl(storagePath, 60 * 60 * 24)
 
     if (signError) {
       console.error('[upload/proof signed URL]', signError)
@@ -172,7 +201,7 @@ router.post('/upload/proof', auth, upload.single('file'), async (req, res) => {
     res.json({ success: true, url: data.signedUrl, path: storagePath })
   } catch (e) {
     console.error('[upload/proof]', e)
-    res.status(500).json({ error: 'Server error' })
+    res.status(500).json({ error: 'Server error: ' + e.message })
   }
 })
 

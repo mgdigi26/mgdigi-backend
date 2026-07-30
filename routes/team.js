@@ -1,42 +1,124 @@
-const express = require('express')
-const router = express.Router()
-const { PrismaClient } = require('@prisma/client')
-const jwt = require('jsonwebtoken')
-const prisma = new PrismaClient()
+const express = require("express");
+const router = express.Router();
+const { PrismaClient } = require("@prisma/client");
+const jwt = require("jsonwebtoken");
+
+const prisma = new PrismaClient();
 
 function auth(req, res, next) {
-  const token = req.headers.authorization?.split(' ')[1]
-  if (!token) return res.status(401).json({ error: 'Unauthorized' })
+  const token = req.headers.authorization?.split(" ")[1];
+
+  if (!token) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
   try {
-    req.user = jwt.verify(token, process.env.JWT_SECRET)
-    next()
+    req.user = jwt.verify(token, process.env.JWT_SECRET);
+    next();
   } catch {
-    res.status(401).json({ error: 'Invalid token' })
+    return res.status(401).json({ error: "Invalid token" });
   }
 }
 
-router.get('/', auth, async (req, res) => {
-  const LEVEL_POINTS = [100, 30, 15, 15, 20, 30, 50]
-  let levels = []
-  let currentIds = [req.user.userId]
+/**
+ * Existing Team Summary Endpoint
+ * DO NOT CHANGE
+ */
+router.get("/", auth, async (req, res) => {
+  try {
+    const LEVEL_POINTS = [100, 30, 15, 15, 20, 30, 50];
 
-  for (let i = 0; i < 7; i++) {
-    const members = await prisma.user.findMany({
-      where: { uplineId: { in: currentIds } },
-      select: { id: true, name: true, phone: true, createdAt: true }
-    })
-    if (members.length === 0) break
-    levels.push({
-      level: i + 1,
-      count: members.length,
-      pointsPerAction: LEVEL_POINTS[i],
-      members
-    })
-    currentIds = members.map(m => m.id)
+    let levels = [];
+    let currentIds = [req.user.userId];
+
+    for (let i = 0; i < 7; i++) {
+      const members = await prisma.user.findMany({
+        where: {
+          uplineId: {
+            in: currentIds,
+          },
+        },
+        select: {
+          id: true,
+          name: true,
+          phone: true,
+          createdAt: true,
+        },
+      });
+
+      if (members.length === 0) break;
+
+      levels.push({
+        level: i + 1,
+        count: members.length,
+        pointsPerAction: LEVEL_POINTS[i],
+        members,
+      });
+
+      currentIds = members.map((m) => m.id);
+    }
+
+    const totalTeam = levels.reduce((sum, l) => sum + l.count, 0);
+
+    res.json({
+      levels,
+      totalTeam,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({
+      error: "Server error",
+    });
   }
+});
 
-  const totalTeam = levels.reduce((sum, l) => sum + l.count, 0)
-  res.json({ levels, totalTeam })
-})
+/**
+ * NEW
+ * Returns all members grouped by level
+ */
+router.get("/members", auth, async (req, res) => {
+  try {
+    let currentIds = [req.user.userId];
+    const members = [];
 
-module.exports = router
+    for (let level = 1; level <= 7; level++) {
+      const downlines = await prisma.user.findMany({
+        where: {
+          uplineId: {
+            in: currentIds,
+          },
+        },
+        select: {
+          id: true,
+          name: true,
+          phone: true,
+          referralCode: true,
+        },
+      });
+
+      if (downlines.length === 0) break;
+
+      downlines.forEach((member) => {
+        members.push({
+          level,
+          name: member.name,
+          phone: member.phone,
+          referralCode: member.referralCode,
+        });
+      });
+
+      currentIds = downlines.map((member) => member.id);
+    }
+
+    res.json({
+      members,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({
+      error: "Server error",
+    });
+  }
+});
+
+module.exports = router;

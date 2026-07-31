@@ -12,20 +12,20 @@
  * /team/members is purely additive.
  */
 
-const express    = require('express')
-const router     = express.Router()
-const { PrismaClient } = require('@prisma/client')
-const jwt        = require('jsonwebtoken')
-const prisma     = new PrismaClient()
+const express = require("express");
+const router = express.Router();
+const { PrismaClient } = require("@prisma/client");
+const jwt = require("jsonwebtoken");
+const prisma = new PrismaClient();
 
 function auth(req, res, next) {
-  const token = req.headers.authorization?.split(' ')[1]
-  if (!token) return res.status(401).json({ error: 'Unauthorized' })
+  const token = req.headers.authorization?.split(" ")[1];
+  if (!token) return res.status(401).json({ error: "Unauthorized" });
   try {
-    req.user = jwt.verify(token, process.env.JWT_SECRET)
-    next()
+    req.user = jwt.verify(token, process.env.JWT_SECRET);
+    next();
   } catch {
-    res.status(401).json({ error: 'Invalid token' })
+    res.status(401).json({ error: "Invalid token" });
   }
 }
 
@@ -34,38 +34,38 @@ function auth(req, res, next) {
 // This handler is reproduced here exactly so the existing route file
 // can be replaced by this one without breaking anything.
 // DO NOT modify the response shape.
-router.get('/team', auth, async (req, res) => {
+router.get("/", auth, async (req, res) => {
   try {
-    const userId = req.user.userId
+    const userId = req.user.userId;
 
     // Walk 7 levels of downline, collect counts
-    const LEVEL_CREDITS = [100, 30, 15, 15, 20, 30, 50]
-    const levels = []
-    let currentLevelIds = [userId]
+    const LEVEL_CREDITS = [100, 30, 15, 15, 20, 30, 50];
+    const levels = [];
+    let currentLevelIds = [userId];
 
     for (let level = 1; level <= 7; level++) {
       // Find all direct downlines of every user at the current level
       const downlines = await prisma.user.findMany({
-        where:  { uplineId: { in: currentLevelIds } },
+        where: { uplineId: { in: currentLevelIds } },
         select: { id: true },
-      })
+      });
 
       levels.push({
         level,
-        count:          downlines.length,
+        count: downlines.length,
         pointsPerAction: LEVEL_CREDITS[level - 1],
-      })
+      });
 
-      if (downlines.length === 0) break
-      currentLevelIds = downlines.map(d => d.id)
+      if (downlines.length === 0) break;
+      currentLevelIds = downlines.map((d) => d.id);
     }
 
-    res.json({ levels })
+    res.json({ levels });
   } catch (e) {
-    console.error('[GET /team]', e)
-    res.status(500).json({ error: 'Server error' })
+    console.error("[GET /team]", e);
+    res.status(500).json({ error: "Server error" });
   }
-})
+});
 
 // ── GET /team/members ─────────────────────────────────────────
 // NEW: returns individual member details grouped by level.
@@ -73,43 +73,43 @@ router.get('/team', auth, async (req, res) => {
 //          referralCode, level.
 // Does NOT return: password, PAN, Aadhaar, bank details, email,
 //                  or any other sensitive field.
-router.get('/team/members', auth, async (req, res) => {
+router.get("/members", auth, async (req, res) => {
   try {
-    const userId = req.user.userId
-    const members = []
-    let currentLevelIds = [userId]
+    const userId = req.user.userId;
+    const members = [];
+    let currentLevelIds = [userId];
 
     for (let level = 1; level <= 7; level++) {
       // Fetch all downlines at this level with only the 3 required fields
       const downlines = await prisma.user.findMany({
-        where:  { uplineId: { in: currentLevelIds } },
+        where: { uplineId: { in: currentLevelIds } },
         select: {
-          id:           true,   // needed for next level traversal only
-          name:         true,
-          phone:        true,   // full number — upline is permitted to see this
+          id: true, // needed for next level traversal only
+          name: true,
+          phone: true, // full number — upline is permitted to see this
           referralCode: true,
         },
-      })
+      });
 
-      if (downlines.length === 0) break
+      if (downlines.length === 0) break;
 
-      downlines.forEach(member => {
+      downlines.forEach((member) => {
         members.push({
           level,
-          name:         member.name,
-          phone:        member.phone,
+          name: member.name,
+          phone: member.phone,
           referralCode: member.referralCode,
-        })
-      })
+        });
+      });
 
-      currentLevelIds = downlines.map(d => d.id)
+      currentLevelIds = downlines.map((d) => d.id);
     }
 
-    res.json({ members })
+    res.json({ members });
   } catch (e) {
-    console.error('[GET /team/members]', e)
-    res.status(500).json({ error: 'Server error' })
+    console.error("[GET /team/members]", e);
+    res.status(500).json({ error: "Server error" });
   }
-})
+});
 
-module.exports = router
+module.exports = router;

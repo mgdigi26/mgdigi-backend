@@ -34,7 +34,7 @@ function auth(req, res, next) {
 // This handler is reproduced here exactly so the existing route file
 // can be replaced by this one without breaking anything.
 // DO NOT modify the response shape.
-router.get("/", auth, async (req, res) => {
+router.get("/team", auth, async (req, res) => {
   try {
     const userId = req.user.userId;
 
@@ -56,8 +56,12 @@ router.get("/", auth, async (req, res) => {
         pointsPerAction: LEVEL_CREDITS[level - 1],
       });
 
-      if (downlines.length === 0) break;
-      currentLevelIds = downlines.map((d) => d.id);
+      // Always continue through all 7 levels so every level's pointsPerAction
+      // is returned even when count is 0. The frontend uses pointsPerAction as
+      // the single source of truth for commission values.
+      if (downlines.length > 0) {
+        currentLevelIds = downlines.map((d) => d.id);
+      }
     }
 
     res.json({ levels });
@@ -73,7 +77,7 @@ router.get("/", auth, async (req, res) => {
 //          referralCode, level.
 // Does NOT return: password, PAN, Aadhaar, bank details, email,
 //                  or any other sensitive field.
-router.get("/members", auth, async (req, res) => {
+router.get("/team/members", auth, async (req, res) => {
   try {
     const userId = req.user.userId;
     const members = [];

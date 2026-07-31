@@ -6,7 +6,7 @@ const bcrypt = require('bcryptjs')
 const prisma = new PrismaClient()
 
 // Run-credit amounts per level (L1=100, L2=20, L3=15, L4=15, L5=20, L6=30, L7=50)
-const LEVEL_CREDITS = [100, 20, 15, 15, 20, 30, 50]
+const LEVEL_CREDITS = [100, 30, 15, 15, 20, 30, 50]
 
 const BCRYPT_ROUNDS = 10
 
@@ -437,6 +437,77 @@ router.post('/reset-password', async (req, res) => {
     )
     res.json({ success: true, token, user: updated })
   } catch (e) {
+    res.status(500).json({ error: 'Server error' })
+  }
+})
+
+// ── ADMIN: UPDATE PARTNER ─────────────────────────────────────
+// PUT /admin/users/:id
+// Admin-only. Updates name, phone, referralCode.
+// Partner Code (id) is never editable.
+// Validates uniqueness of phone and referralCode.
+router.put('/admin/users/:id', async (req, res) => {
+  try {
+    const decoded = verifyToken(req)
+    if (!decoded) return res.status(401).json({ error: 'Unauthorized' })
+    if (decoded.role !== 'admin') return res.status(403).json({ error: 'Admins only' })
+
+    const { id }   = req.params
+    const { name, phone, referralCode } = req.body
+
+    // Target user must exist
+    const target = await prisma.user.findUnique({ where: { id } })
+    if (!target) return res.status(404).json({ error: 'Partner not found' })
+
+    const updateData = {}
+
+    if (name !== undefined) {
+      if (!name || !name.trim()) return res.status(400).json({ error: 'Name cannot be empty' })
+      updateData.name = name.trim()
+    }
+
+    if (phone !== undefined) {
+      const cleaned = phone.toString().trim()
+      if (!/^[6-9]\d{9}$/.test(cleaned)) {
+        return res.status(400).json({ error: 'Enter a valid 10-digit mobile number' })
+      }
+      // Uniqueness check — exclude current user
+      const existing = await prisma.user.findFirst({
+        where: { phone: cleaned, id: { not: id } }
+      })
+      if (existing) return res.status(409).json({ error: 'Mobile number already registered to another partner' })
+      updateData.phone = cleaned
+    }
+
+    if (referralCode !== undefined) {
+      const cleaned = referralCode.toString().toUpperCase().trim()
+      if (!cleaned) return res.status(400).json({ error: 'Referral code cannot be empty' })
+      // Uniqueness check — exclude current user
+      const existing = await prisma.user.findFirst({
+        where: { referralCode: cleaned, id: { not: id } }
+      })
+      if (existing) return res.status(409).json({ error: 'Referral code already in use by another partner' })
+      updateData.referralCode = cleaned
+    }
+
+    if (!Object.keys(updateData).length) {
+      return res.status(400).json({ error: 'No valid fields provided' })
+    }
+
+    const updated = await prisma.user.update({
+      where: { id },
+      data:  updateData,
+      select: {
+        id: true, name: true, phone: true, referralCode: true,
+        email: true, isActive: true, role: true, createdAt: true,
+        pointsWallet:   { select: { balance: true } },
+        earningsWallet: { select: { balance: true } },
+      },
+    })
+
+    res.json({ success: true, user: updated })
+  } catch (e) {
+    console.error('[admin/users/:id PUT]', e)
     res.status(500).json({ error: 'Server error' })
   }
 })

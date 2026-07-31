@@ -416,7 +416,7 @@ router.post('/enrollment/:id/approve', adminAuth, async (req, res) => {
     const reward = enrollment.schedule.rewardAmt
 
     // Build commission chain before transaction (read-only, safe outside)
-    const LEVEL_CREDITS = [100, 20, 15, 15, 20, 30, 50]
+    const LEVEL_CREDITS = [100, 30, 15, 15, 20, 30, 50]
     const commissionOps = []
     let currentUserId = enrollment.userId
     for (let level = 0; level < 7; level++) {

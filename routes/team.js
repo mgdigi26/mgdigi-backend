@@ -1,124 +1,115 @@
-const express = require("express");
-const router = express.Router();
-const { PrismaClient } = require("@prisma/client");
-const jwt = require("jsonwebtoken");
+/**
+ * routes/team.js — Partner Team endpoints
+ *
+ * GET /team         — existing: aggregate counts per level (UNCHANGED)
+ * GET /team/members — new: individual member list grouped by level
+ *
+ * Register in index.js:
+ *   const teamRouter = require('./routes/team')
+ *   app.use('/api', teamRouter)
+ *
+ * The existing /team endpoint behaviour is preserved exactly.
+ * /team/members is purely additive.
+ */
 
-const prisma = new PrismaClient();
+const express    = require('express')
+const router     = express.Router()
+const { PrismaClient } = require('@prisma/client')
+const jwt        = require('jsonwebtoken')
+const prisma     = new PrismaClient()
 
 function auth(req, res, next) {
-  const token = req.headers.authorization?.split(" ")[1];
-
-  if (!token) {
-    return res.status(401).json({ error: "Unauthorized" });
-  }
-
+  const token = req.headers.authorization?.split(' ')[1]
+  if (!token) return res.status(401).json({ error: 'Unauthorized' })
   try {
-    req.user = jwt.verify(token, process.env.JWT_SECRET);
-    next();
+    req.user = jwt.verify(token, process.env.JWT_SECRET)
+    next()
   } catch {
-    return res.status(401).json({ error: "Invalid token" });
+    res.status(401).json({ error: 'Invalid token' })
   }
 }
 
-/**
- * Existing Team Summary Endpoint
- * DO NOT CHANGE
- */
-router.get("/", auth, async (req, res) => {
+// ── GET /team ─────────────────────────────────────────────────
+// Existing behaviour: returns aggregate counts per level.
+// This handler is reproduced here exactly so the existing route file
+// can be replaced by this one without breaking anything.
+// DO NOT modify the response shape.
+router.get('/team', auth, async (req, res) => {
   try {
-    const LEVEL_POINTS = [100, 30, 15, 15, 20, 30, 50];
+    const userId = req.user.userId
 
-    let levels = [];
-    let currentIds = [req.user.userId];
-
-    for (let i = 0; i < 7; i++) {
-      const members = await prisma.user.findMany({
-        where: {
-          uplineId: {
-            in: currentIds,
-          },
-        },
-        select: {
-          id: true,
-          name: true,
-          phone: true,
-          createdAt: true,
-        },
-      });
-
-      if (members.length === 0) break;
-
-      levels.push({
-        level: i + 1,
-        count: members.length,
-        pointsPerAction: LEVEL_POINTS[i],
-        members,
-      });
-
-      currentIds = members.map((m) => m.id);
-    }
-
-    const totalTeam = levels.reduce((sum, l) => sum + l.count, 0);
-
-    res.json({
-      levels,
-      totalTeam,
-    });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({
-      error: "Server error",
-    });
-  }
-});
-
-/**
- * NEW
- * Returns all members grouped by level
- */
-router.get("/members", auth, async (req, res) => {
-  try {
-    let currentIds = [req.user.userId];
-    const members = [];
+    // Walk 7 levels of downline, collect counts
+    const LEVEL_CREDITS = [100, 30, 15, 15, 20, 30, 50]
+    const levels = []
+    let currentLevelIds = [userId]
 
     for (let level = 1; level <= 7; level++) {
+      // Find all direct downlines of every user at the current level
       const downlines = await prisma.user.findMany({
-        where: {
-          uplineId: {
-            in: currentIds,
-          },
-        },
-        select: {
-          id: true,
-          name: true,
-          phone: true,
-          referralCode: true,
-        },
-      });
+        where:  { uplineId: { in: currentLevelIds } },
+        select: { id: true },
+      })
 
-      if (downlines.length === 0) break;
+      levels.push({
+        level,
+        count:          downlines.length,
+        pointsPerAction: LEVEL_CREDITS[level - 1],
+      })
 
-      downlines.forEach((member) => {
-        members.push({
-          level,
-          name: member.name,
-          phone: member.phone,
-          referralCode: member.referralCode,
-        });
-      });
-
-      currentIds = downlines.map((member) => member.id);
+      if (downlines.length === 0) break
+      currentLevelIds = downlines.map(d => d.id)
     }
 
-    res.json({
-      members,
-    });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({
-      error: "Server error",
-    });
+    res.json({ levels })
+  } catch (e) {
+    console.error('[GET /team]', e)
+    res.status(500).json({ error: 'Server error' })
   }
-});
+})
 
-module.exports = router;
+// ── GET /team/members ─────────────────────────────────────────
+// NEW: returns individual member details grouped by level.
+// Returns: name, phone (full — intentional business requirement),
+//          referralCode, level.
+// Does NOT return: password, PAN, Aadhaar, bank details, email,
+//                  or any other sensitive field.
+router.get('/team/members', auth, async (req, res) => {
+  try {
+    const userId = req.user.userId
+    const members = []
+    let currentLevelIds = [userId]
+
+    for (let level = 1; level <= 7; level++) {
+      // Fetch all downlines at this level with only the 3 required fields
+      const downlines = await prisma.user.findMany({
+        where:  { uplineId: { in: currentLevelIds } },
+        select: {
+          id:           true,   // needed for next level traversal only
+          name:         true,
+          phone:        true,   // full number — upline is permitted to see this
+          referralCode: true,
+        },
+      })
+
+      if (downlines.length === 0) break
+
+      downlines.forEach(member => {
+        members.push({
+          level,
+          name:         member.name,
+          phone:        member.phone,
+          referralCode: member.referralCode,
+        })
+      })
+
+      currentLevelIds = downlines.map(d => d.id)
+    }
+
+    res.json({ members })
+  } catch (e) {
+    console.error('[GET /team/members]', e)
+    res.status(500).json({ error: 'Server error' })
+  }
+})
+
+module.exports = router

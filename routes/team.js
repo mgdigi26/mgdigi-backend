@@ -34,7 +34,7 @@ function auth(req, res, next) {
 // This handler is reproduced here exactly so the existing route file
 // can be replaced by this one without breaking anything.
 // DO NOT modify the response shape.
-router.get("/team", auth, async (req, res) => {
+router.get("/", auth, async (req, res) => {
   try {
     const userId = req.user.userId;
 
@@ -77,7 +77,7 @@ router.get("/team", auth, async (req, res) => {
 //          referralCode, level.
 // Does NOT return: password, PAN, Aadhaar, bank details, email,
 //                  or any other sensitive field.
-router.get("/team/members", auth, async (req, res) => {
+router.get("/members", auth, async (req, res) => {
   try {
     const userId = req.user.userId;
     const members = [];

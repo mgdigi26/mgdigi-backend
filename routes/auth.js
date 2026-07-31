@@ -443,17 +443,19 @@ router.post('/reset-password', async (req, res) => {
 
 // ── ADMIN: UPDATE PARTNER ─────────────────────────────────────
 // PUT /admin/users/:id
-// Admin-only. Updates name, phone, referralCode.
-// Partner Code (id) is never editable.
-// Validates uniqueness of phone and referralCode.
+// Admin-only. Editable fields: name, phone, uplineReferralCode.
+// Partner's own referral code (referralCode) is NEVER editable.
+// Partner Code (id) is NEVER editable.
+// uplineReferralCode updates user.uplineId — changes future hierarchy only.
+// Historical commissions, wallets, and rewards are never recalculated.
 router.put('/admin/users/:id', async (req, res) => {
   try {
     const decoded = verifyToken(req)
     if (!decoded) return res.status(401).json({ error: 'Unauthorized' })
     if (decoded.role !== 'admin') return res.status(403).json({ error: 'Admins only' })
 
-    const { id }   = req.params
-    const { name, phone, referralCode } = req.body
+    const { id } = req.params
+    const { name, phone, uplineReferralCode } = req.body
 
     // Target user must exist
     const target = await prisma.user.findUnique({ where: { id } })
@@ -461,17 +463,18 @@ router.put('/admin/users/:id', async (req, res) => {
 
     const updateData = {}
 
+    // ── Name ────────────────────────────────────────────────────
     if (name !== undefined) {
       if (!name || !name.trim()) return res.status(400).json({ error: 'Name cannot be empty' })
       updateData.name = name.trim()
     }
 
+    // ── Phone ────────────────────────────────────────────────────
     if (phone !== undefined) {
       const cleaned = phone.toString().trim()
       if (!/^[6-9]\d{9}$/.test(cleaned)) {
         return res.status(400).json({ error: 'Enter a valid 10-digit mobile number' })
       }
-      // Uniqueness check — exclude current user
       const existing = await prisma.user.findFirst({
         where: { phone: cleaned, id: { not: id } }
       })
@@ -479,15 +482,38 @@ router.put('/admin/users/:id', async (req, res) => {
       updateData.phone = cleaned
     }
 
-    if (referralCode !== undefined) {
-      const cleaned = referralCode.toString().toUpperCase().trim()
-      if (!cleaned) return res.status(400).json({ error: 'Referral code cannot be empty' })
-      // Uniqueness check — exclude current user
-      const existing = await prisma.user.findFirst({
-        where: { referralCode: cleaned, id: { not: id } }
-      })
-      if (existing) return res.status(409).json({ error: 'Referral code already in use by another partner' })
-      updateData.referralCode = cleaned
+    // ── Upline (Referred By) ─────────────────────────────────────
+    // uplineReferralCode is the referral code of the NEW upline.
+    // Validates: exists, not self, no circular chain.
+    // Only writes uplineId — never touches referralCode, wallets, or history.
+    if (uplineReferralCode !== undefined) {
+      const code = uplineReferralCode.toString().toUpperCase().trim()
+
+      if (!code) return res.status(400).json({ error: 'Referred By code cannot be empty' })
+
+      // Upline must exist
+      const newUpline = await prisma.user.findUnique({ where: { referralCode: code } })
+      if (!newUpline) return res.status(404).json({ error: 'Referral code not found. Please enter a valid upline code.' })
+
+      // Cannot refer yourself
+      if (newUpline.id === id) {
+        return res.status(400).json({ error: 'A partner cannot be referred by themselves' })
+      }
+
+      // Circular chain check: walk the new upline's ancestry — if we find
+      // the current user anywhere in the chain, this would create a loop.
+      let cursor = newUpline
+      let depth  = 0
+      while (cursor.uplineId && depth < 8) {
+        if (cursor.uplineId === id) {
+          return res.status(400).json({ error: 'This would create a circular referral relationship' })
+        }
+        cursor = await prisma.user.findUnique({ where: { id: cursor.uplineId } })
+        if (!cursor) break
+        depth++
+      }
+
+      updateData.uplineId = newUpline.id
     }
 
     if (!Object.keys(updateData).length) {
@@ -499,7 +525,7 @@ router.put('/admin/users/:id', async (req, res) => {
       data:  updateData,
       select: {
         id: true, name: true, phone: true, referralCode: true,
-        email: true, isActive: true, role: true, createdAt: true,
+        uplineId: true, email: true, isActive: true, role: true, createdAt: true,
         pointsWallet:   { select: { balance: true } },
         earningsWallet: { select: { balance: true } },
       },

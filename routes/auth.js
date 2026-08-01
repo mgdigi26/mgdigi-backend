@@ -29,6 +29,136 @@ function verifyToken(req) {
   }
 }
 
+
+// ── MEMBERSHIP ACTIVATION ─────────────────────────────────────
+// This is the ONLY place where:
+//   • membershipStatus is set to active
+//   • Marketing Points are credited to uplines
+//   • RunCredit records are created
+//   • ActivityFeed entries are created
+//   • Referral Join Transactions are created
+//
+// Called from:
+//   • POST /admin/activate/:id   — manual activation by admin
+//   • Future: Razorpay webhook    — no further code changes required
+//
+// Idempotency: Transaction.referenceId = user.id prevents
+//              double-credit if called twice for the same user.
+async function activateMembership(userId) {
+  const user = await prisma.user.findUnique({ where: { id: userId } })
+  if (!user) throw new Error('User not found: ' + userId)
+
+  // Guard — already active users are skipped silently
+  if (user.membershipStatus === 'active') return { alreadyActive: true }
+
+  // 1. Mark membership active + feePaid
+  await prisma.user.update({
+    where: { id: userId },
+    data: {
+      membershipStatus: 'active',
+      feePaid:          true,
+      feePaidAt:        new Date(),
+    }
+  })
+
+  // 2. Marketing Points: walk 7 upline levels
+  let mpCurrentUser = user
+  for (let mpLevel = 0; mpLevel < 7; mpLevel++) {
+    const mpCurrent = await prisma.user.findUnique({ where: { id: mpCurrentUser.id } })
+    if (!mpCurrent?.uplineId) break
+
+    const mpPoints = LEVEL_CREDITS[mpLevel]
+
+    // Idempotency check — one reward per activation per upline level
+    const alreadyRewarded = await prisma.transaction.findFirst({
+      where: {
+        userId:      mpCurrent.uplineId,
+        type:        'referral_join',
+        referenceId: user.id,
+      }
+    })
+
+    if (!alreadyRewarded) {
+      await prisma.$transaction([
+        prisma.pointsWallet.update({
+          where: { userId: mpCurrent.uplineId },
+          data:  { balance: { increment: mpPoints }, lifetime: { increment: mpPoints } }
+        }),
+        prisma.transaction.create({
+          data: {
+            userId:      mpCurrent.uplineId,
+            type:        'referral_join',
+            referenceId: user.id,
+            amount:      0,
+            points:      mpPoints,
+            description: `Referral bonus — ${user.name || 'New Partner'} activated (Level ${mpLevel + 1})`,
+          }
+        })
+      ])
+    }
+
+    const mpUpline = await prisma.user.findUnique({ where: { id: mpCurrent.uplineId } })
+    if (!mpUpline) break
+    mpCurrentUser = mpUpline
+  }
+
+  // 3. RunCredits + ActivityFeed: walk 7 upline levels
+  let currentUser = user
+  for (let level = 0; level < 7; level++) {
+    const current = await prisma.user.findUnique({ where: { id: currentUser.id } })
+    if (!current?.uplineId) break
+    const creditAmount = LEVEL_CREDITS[level]
+
+    // Idempotency check — skip RunCredit if one already exists for this
+    // userId + sourceUserId + tier combination. Prevents duplicates if
+    // activateMembership() is called more than once for the same user.
+    const existingRunCredit = await prisma.runCredit.findFirst({
+      where: {
+        userId:       current.uplineId,
+        sourceUserId: user.id,
+        tier:         level + 1,
+      }
+    })
+    if (!existingRunCredit) {
+      await prisma.runCredit.create({
+        data: {
+          userId:       current.uplineId,
+          tier:         level + 1,
+          amount:       creditAmount,
+          sourceUserId: user.id,
+          sourceLevel:  level + 1
+        }
+      })
+    }
+
+    await prisma.activityFeed.create({
+      data: {
+        type:        'join',
+        userId:      user.id,
+        userName:    user.name || 'New Partner',
+        description: `${user.name || 'New Partner'} activated under Level ${level + 1}`,
+        amount:      creditAmount
+      }
+    })
+    const uplineUser = await prisma.user.findUnique({ where: { id: current.uplineId } })
+    if (!uplineUser) break
+    currentUser = uplineUser
+  }
+
+  // 4. ActivityFeed — self entry
+  await prisma.activityFeed.create({
+    data: {
+      type:        'join',
+      userId:      user.id,
+      userName:    user.name || 'New Partner',
+      description: `${user.name || 'New Partner'} joined MGdigi`,
+      amount:      null
+    }
+  })
+
+  return { activated: true }
+}
+
 // ── SEND OTP ──────────────────────────────────────────────────
 router.post('/send-otp', async (req, res) => {
   try {
@@ -69,100 +199,28 @@ router.post('/verify-otp', async (req, res) => {
 
       user = await prisma.user.create({
         data: {
-          name: name || 'Partner',
+          name:             name || 'Partner',
           phone,
-          referralCode: generateReferralCode(),
+          referralCode:     generateReferralCode(),
           uplineId,
+          membershipStatus: 'PENDING',
+          feePaid:          false,
           pointsWallet:   { create: { balance: 0, lifetime: 0 } },
           earningsWallet: { create: { balance: 0, lifetime: 0 } }
         }
       })
 
-      // ── MARKETING POINTS: credit upline immediately on registration ─────
-      // Walk 7 upline levels and increment PointsWallet.balance + lifetime.
-      // Idempotency: skip if a Transaction (type=referral_join, referenceId=user.id)
-      // already exists for this upline — prevents double-credit on retries.
-      // RunCredit creation (below) is completely unchanged.
-      let mpCurrentUser = user
-      for (let mpLevel = 0; mpLevel < 7; mpLevel++) {
-        const mpCurrent = await prisma.user.findUnique({ where: { id: mpCurrentUser.id } })
-        if (!mpCurrent?.uplineId) break
+      // Rewards are NOT credited at registration.
+      // They are credited when membership is activated via activateMembership().
+    }
 
-        const mpPoints = LEVEL_CREDITS[mpLevel]
-
-        // Idempotency check — one reward per registration per upline level
-        const alreadyRewarded = await prisma.transaction.findFirst({
-          where: {
-            userId:      mpCurrent.uplineId,
-            type:        'referral_join',
-            referenceId: user.id,
-          }
-        })
-
-        if (!alreadyRewarded) {
-          // Wallet update + audit transaction are atomic — either both succeed or both roll back.
-          // This prevents partial writes (wallet credited without a transaction record, or vice versa).
-          await prisma.$transaction([
-            prisma.pointsWallet.update({
-              where: { userId: mpCurrent.uplineId },
-              data:  { balance: { increment: mpPoints }, lifetime: { increment: mpPoints } }
-            }),
-            prisma.transaction.create({
-              data: {
-                userId:      mpCurrent.uplineId,
-                type:        'referral_join',
-                referenceId: user.id,
-                amount:      0,
-                points:      mpPoints,
-                description: `Referral bonus — ${user.name || 'New Partner'} joined (Level ${mpLevel + 1})`,
-              }
-            })
-          ])
-        }
-
-        const mpUpline = await prisma.user.findUnique({ where: { id: mpCurrent.uplineId } })
-        if (!mpUpline) break
-        mpCurrentUser = mpUpline
-      }
-      // ── END Marketing Points block ────────────────────────────────────
-
-      // Walk upline 7 levels and credit run-credits
-      let currentUser = user
-      for (let level = 0; level < 7; level++) {
-        const current = await prisma.user.findUnique({ where: { id: currentUser.id } })
-        if (!current?.uplineId) break
-        const creditAmount = LEVEL_CREDITS[level]
-        await prisma.runCredit.create({
-          data: {
-            userId:      current.uplineId,
-            tier:        level + 1,
-            amount:      creditAmount,
-            sourceUserId: user.id,
-            sourceLevel: level + 1
-          }
-        })
-        await prisma.activityFeed.create({
-          data: {
-            type:        'join',
-            userId:      user.id,
-            userName:    user.name || 'New Partner',
-            description: `${user.name || 'New Partner'} joined under Level ${level + 1}`,
-            amount:      creditAmount
-          }
-        })
-        const uplineUser = await prisma.user.findUnique({ where: { id: current.uplineId } })
-        if (!uplineUser) break
-        currentUser = uplineUser
-      }
-
-      await prisma.activityFeed.create({
-        data: {
-          type:        'join',
-          userId:      user.id,
-          userName:    user.name || 'New Partner',
-          description: `${user.name || 'New Partner'} joined MGdigi`,
-          amount:      null
-        }
+    // Block login ONLY for users explicitly created with membershipStatus = 'PENDING'.
+    // Existing users (null / 'inactive' / 'active' / any other value) pass through
+    // without interruption — backward compatibility for all live users is preserved.
+    if (user.membershipStatus === 'PENDING') {
+      return res.status(403).json({
+        error: 'Your membership has not been activated yet. Please complete payment or contact the administrator.',
+        membershipPending: true
       })
     }
 
@@ -330,6 +388,16 @@ router.post('/login-password', async (req, res) => {
       return res.status(401).json({ error: 'Invalid mobile number or password' })
     }
 
+    // Block login ONLY for users explicitly created with membershipStatus = 'PENDING'.
+    // Existing users (null / 'inactive' / 'active' / any other value) pass through
+    // without interruption — backward compatibility for all live users is preserved.
+    if (user.membershipStatus === 'PENDING') {
+      return res.status(403).json({
+        error: 'Your membership has not been activated yet. Please complete payment or contact the administrator.',
+        membershipPending: true
+      })
+    }
+
     // Update lastLoginAt — non-blocking audit field
     try {
       await prisma.user.update({
@@ -421,6 +489,16 @@ router.post('/reset-password', async (req, res) => {
     // Find user
     const user = await prisma.user.findUnique({ where: { phone } })
     if (!user) return res.status(404).json({ error: 'Account not found' })
+
+    // Block password reset ONLY for users explicitly created with membershipStatus = 'PENDING'.
+    // Existing users (null / 'inactive' / 'active' / any other value) pass through
+    // without interruption — backward compatibility for all live users is preserved.
+    if (user.membershipStatus === 'PENDING') {
+      return res.status(403).json({
+        error: 'Your membership has not been activated yet. Please complete payment or contact the administrator.',
+        membershipPending: true
+      })
+    }
 
     // Hash and save new password
     const hashed = await bcrypt.hash(password, BCRYPT_ROUNDS)
@@ -535,6 +613,29 @@ router.put('/admin/users/:id', async (req, res) => {
   } catch (e) {
     console.error('[admin/users/:id PUT]', e)
     res.status(500).json({ error: 'Server error' })
+  }
+})
+
+// ── ADMIN: ACTIVATE MEMBERSHIP ────────────────────────────────
+// POST /admin/activate/:id
+// Admin-only. Calls activateMembership(userId) for a PENDING partner.
+// Safe to call on already-active users — activateMembership() returns early.
+router.post('/admin/activate/:id', async (req, res) => {
+  try {
+    const decoded = verifyToken(req)
+    if (!decoded) return res.status(401).json({ error: 'Unauthorized' })
+    if (decoded.role !== 'admin') return res.status(403).json({ error: 'Admins only' })
+
+    const result = await activateMembership(req.params.id)
+
+    if (result.alreadyActive) {
+      return res.json({ success: true, message: 'Membership was already active' })
+    }
+
+    res.json({ success: true, message: 'Membership activated successfully' })
+  } catch (e) {
+    console.error('[admin/activate/:id]', e)
+    res.status(500).json({ error: e.message || 'Server error' })
   }
 })
 

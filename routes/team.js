@@ -77,7 +77,7 @@ router.get("/", auth, async (req, res) => {
 //          referralCode, level.
 // Does NOT return: password, PAN, Aadhaar, bank details, email,
 //                  or any other sensitive field.
-router.get("/team/members", auth, async (req, res) => {
+router.get("/members", auth, async (req, res) => {
   try {
     const userId = req.user.userId;
     const members = [];

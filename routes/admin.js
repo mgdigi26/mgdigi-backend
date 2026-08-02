@@ -39,14 +39,49 @@ router.get("/dashboard", auth, async (req, res) => {
   });
 });
 
-// Get all pending submissions
+// Get all pending proof submissions
 router.get("/submissions", auth, async (req, res) => {
-  const submissions = await prisma.submission.findMany({
-    where: { status: "pending" },
-    include: { user: true, campaign: true },
-    orderBy: { submittedAt: "desc" },
-  });
-  res.json(submissions);
+  try {
+    const submissions = await prisma.campaignEnrollment.findMany({
+      where: {
+        status: "pending",
+        screenshotUrl: {
+          not: null,
+        },
+      },
+      include: {
+        user: true,
+        schedule: true,
+      },
+      orderBy: {
+        submittedAt: "desc",
+      },
+    });
+
+    const formatted = submissions.map((item) => ({
+      id: item.id,
+      status: item.status,
+      screenshotUrl: item.screenshotUrl,
+      submittedAt: item.submittedAt,
+      reviewedAt: item.reviewedAt,
+      rejectReason: item.rejectReason,
+
+      user: item.user,
+
+      campaign: {
+        id: item.schedule.id,
+        name: item.schedule.name,
+        type: item.schedule.type,
+      },
+
+      dayNumber: item.dayNumber,
+    }));
+
+    res.json(formatted);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
 });
 
 // Approve submission + trigger commissions

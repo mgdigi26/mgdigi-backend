@@ -86,22 +86,30 @@ router.get("/submissions", auth, async (req, res) => {
 
 // Approve submission + trigger commissions
 router.post("/submissions/:id/approve", auth, async (req, res) => {
-  const submission = await prisma.submission.update({
-    where: { id: req.params.id },
+  const submission = await prisma.campaignEnrollment.update({
+    where: {
+      id: req.params.id,
+    },
     data: {
       status: "approved",
-      reviewedBy: req.user.userId,
       reviewedAt: new Date(),
     },
-    include: { campaign: true, user: true },
+    include: {
+      user: true,
+      schedule: true,
+    },
   });
 
   // Credit reward to the partner
   await prisma.earningsWallet.update({
     where: { userId: submission.userId },
     data: {
-      balance: { increment: submission.campaign.rewardAmt },
-      lifetime: { increment: submission.campaign.rewardAmt },
+      balance: {
+        increment: submission.schedule.rewardAmt,
+      },
+      lifetime: {
+        increment: submission.schedule.rewardAmt,
+      },
     },
   });
 
@@ -109,12 +117,11 @@ router.post("/submissions/:id/approve", auth, async (req, res) => {
     data: {
       userId: submission.userId,
       type: "campaign_reward",
-      amount: submission.campaign.rewardAmt,
+      amount: submission.schedule.rewardAmt,
       referenceId: submission.id,
-      description: `${submission.campaign.name} reward approved`,
+      description: `${submission.schedule.name} reward approved`,
     },
   });
-
   // Walk up 7 levels and credit points
   let currentUserId = submission.userId;
   for (let level = 0; level < 7; level++) {

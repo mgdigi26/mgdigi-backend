@@ -31,6 +31,7 @@ model User {
   membershipStatus  String?  @default("inactive")
   razorpayOrderId   String?
   razorpayPaymentId String?
+  manualPayments    ManualPayment[]
   kycStatus     String   @default("pending")
   panNumber     String?
   aadhaarLast4  String?
@@ -209,4 +210,19 @@ model AppSetting {
   key       String   @unique
   value     String
   updatedAt DateTime @updatedAt
+}
+
+model ManualPayment {
+  id            String    @id @default(uuid())
+  userId        String
+  user          User      @relation(fields: [userId], references: [id])
+  referenceNo   String
+  screenshotUrl String?
+  amount        Float     @default(599)
+  paymentMethod String    @default("MANUAL")   // MANUAL | RAZORPAY
+  status        String    @default("PENDING")   // PENDING | APPROVED | REJECTED
+  verifiedAt    DateTime?
+  verifiedBy    String?   // admin userId who approved/rejected
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
 }

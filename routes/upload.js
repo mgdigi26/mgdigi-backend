@@ -14,11 +14,15 @@ const router     = express.Router()
 const jwt        = require('jsonwebtoken')
 const { createClient } = require('@supabase/supabase-js')
 const path       = require('path')
+const ws         = require('ws')
 
 // ── Supabase client ───────────────────────────────────────────
+// Node.js 20 does not expose a global WebSocket by default.
+// @supabase/supabase-js 2.109.0 requires ws to be supplied explicitly.
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
+  process.env.SUPABASE_SERVICE_ROLE_KEY,
+  { global: { fetch: fetch, WebSocket: ws } }
 )
 
 // ── Auth helpers ──────────────────────────────────────────────

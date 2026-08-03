@@ -187,7 +187,70 @@ router.get("/withdrawals", auth, async (req, res) => {
   });
   res.json(withdrawals);
 });
+router.put("/users/:id", auth, async (req, res) => {
+  try {
+    const { name, phone, referredBy } = req.body;
 
+    // Check duplicate phone
+    const existingPhone = await prisma.user.findFirst({
+      where: {
+        phone,
+        NOT: {
+          id: req.params.id,
+        },
+      },
+    });
+
+    if (existingPhone) {
+      return res.status(400).json({
+        error: "Phone number already exists",
+      });
+    }
+
+    let uplineId = null;
+
+    if (referredBy && referredBy.trim()) {
+      const upline = await prisma.user.findUnique({
+        where: {
+          referralCode: referredBy.trim(),
+        },
+      });
+
+      if (!upline) {
+        return res.status(400).json({
+          error: "Invalid referral code",
+        });
+      }
+
+      uplineId = upline.id;
+    }
+
+    const user = await prisma.user.update({
+      where: {
+        id: req.params.id,
+      },
+      data: {
+        name,
+        phone,
+        uplineId,
+      },
+      include: {
+        pointsWallet: true,
+        earningsWallet: true,
+      },
+    });
+
+    res.json({
+      success: true,
+      user,
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({
+      error: "Server error",
+    });
+  }
+});
 // Approve withdrawal
 router.post("/withdrawals/:id/approve", auth, async (req, res) => {
   const withdrawal = await prisma.withdrawal.findUnique({

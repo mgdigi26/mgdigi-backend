@@ -189,10 +189,10 @@ router.get("/withdrawals", auth, async (req, res) => {
 });
 router.put("/users/:id", auth, async (req, res) => {
   try {
-    const { name, phone, referredBy } = req.body;
+    const { name, phone, uplineReferralCode } = req.body;
 
     // Check duplicate phone
-    const existingPhone = await prisma.user.findFirst({
+    const existing = await prisma.user.findFirst({
       where: {
         phone,
         NOT: {
@@ -201,18 +201,21 @@ router.put("/users/:id", auth, async (req, res) => {
       },
     });
 
-    if (existingPhone) {
+    if (existing) {
       return res.status(400).json({
         error: "Phone number already exists",
       });
     }
 
-    let uplineId = null;
+    let data = {
+      name,
+      phone,
+    };
 
-    if (referredBy && referredBy.trim()) {
+    if (uplineReferralCode && uplineReferralCode.trim()) {
       const upline = await prisma.user.findUnique({
         where: {
-          referralCode: referredBy.trim(),
+          referralCode: uplineReferralCode.trim().toUpperCase(),
         },
       });
 
@@ -222,18 +225,14 @@ router.put("/users/:id", auth, async (req, res) => {
         });
       }
 
-      uplineId = upline.id;
+      data.uplineId = upline.id;
     }
 
     const user = await prisma.user.update({
       where: {
         id: req.params.id,
       },
-      data: {
-        name,
-        phone,
-        uplineId,
-      },
+      data,
       include: {
         pointsWallet: true,
         earningsWallet: true,
@@ -244,8 +243,8 @@ router.put("/users/:id", auth, async (req, res) => {
       success: true,
       user,
     });
-  } catch (e) {
-    console.error(e);
+  } catch (err) {
+    console.error(err);
     res.status(500).json({
       error: "Server error",
     });

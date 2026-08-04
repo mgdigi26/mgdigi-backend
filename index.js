@@ -8,6 +8,8 @@ app.use(express.json());
 
 const settingsRouter = require("./routes/settings");
 app.use("/api", settingsRouter);
+const paymentRouter = require("./routes/payment");
+app.use("/api", paymentRouter);
 
 // Routes
 app.use("/api/auth", require("./routes/auth"));
@@ -23,6 +25,8 @@ app.use("/api/schedule", require("./routes/schedule"));
 
 const uploadRouter = require("./routes/upload");
 app.use("/api", uploadRouter);
+
+app.use("/api", paymentRouter);
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {

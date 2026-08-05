@@ -19,6 +19,9 @@ const router   = express.Router()
 const Razorpay = require('razorpay')
 const jwt      = require('jsonwebtoken')
 const crypto   = require('crypto')
+const { PrismaClient }      = require('@prisma/client')
+const { activateMembership } = require('../services/membershipService')
+const prisma = new PrismaClient()
 
 // ── Razorpay client — lazy initialisation ────────────────────
 // The client is created on first use, not at module load time.
@@ -92,20 +95,14 @@ router.post('/payment/create-order', auth, async (req, res) => {
 
 // ── POST /payment/verify ──────────────────────────────────────
 /**
- * Phase 2A — Verify Razorpay payment signature.
+ * Phase 2B — Verify signature, save IDs, activate membership.
  * Validates the HMAC-SHA256 signature exactly as required by Razorpay.
  *
  * Receives:  { razorpay_payment_id, razorpay_order_id, razorpay_signature }
- * Returns:   { success: true }  on valid signature
- * Returns:   HTTP 400           on invalid signature
- *
- * Does NOT activate membership.
- * Does NOT update the database.
- * Does NOT save payment IDs.
- * Does NOT create transactions.
- * Does NOT update wallets or user records.
+ * Returns:   { success: true, activated: true }  on valid signature + activation
+ * Returns:   HTTP 400  on invalid signature
  */
-router.post('/payment/verify', auth, (req, res) => {
+router.post('/payment/verify', auth, async (req, res) => {
   try {
     const { razorpay_payment_id, razorpay_order_id, razorpay_signature } = req.body
 
@@ -132,7 +129,19 @@ router.post('/payment/verify', auth, (req, res) => {
       return res.status(400).json({ error: 'Payment verification failed. Invalid signature.' })
     }
 
-    res.json({ success: true })
+    // Signature valid — save Razorpay IDs to User record
+    await prisma.user.update({
+      where: { id: req.user.userId },
+      data: {
+        razorpayOrderId:   razorpay_order_id,
+        razorpayPaymentId: razorpay_payment_id,
+      }
+    })
+
+    // Activate membership — idempotent, safe to call multiple times
+    await activateMembership(req.user.userId)
+
+    res.json({ success: true, activated: true })
   } catch (e) {
     console.error('[payment/verify]', e)
     res.status(500).json({ error: 'Server error during payment verification.' })

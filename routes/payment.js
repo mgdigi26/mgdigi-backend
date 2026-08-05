@@ -20,11 +20,19 @@ const Razorpay = require('razorpay')
 const jwt      = require('jsonwebtoken')
 const crypto   = require('crypto')
 
-// ── Razorpay client ───────────────────────────────────────────
-const razorpay = new Razorpay({
-  key_id:     process.env.RAZORPAY_KEY_ID,
-  key_secret: process.env.RAZORPAY_KEY_SECRET,
-})
+// ── Razorpay client — lazy initialisation ────────────────────
+// The client is created on first use, not at module load time.
+// This prevents the server from crashing on startup when
+// RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET are not yet configured.
+function getRazorpayClient() {
+  if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
+    return null
+  }
+  return new Razorpay({
+    key_id:     process.env.RAZORPAY_KEY_ID,
+    key_secret: process.env.RAZORPAY_KEY_SECRET,
+  })
+}
 
 // ── Auth middleware — same pattern as routes/team.js and routes/upload.js ──
 function auth(req, res, next) {
@@ -52,6 +60,11 @@ function auth(req, res, next) {
  */
 router.post('/payment/create-order', auth, async (req, res) => {
   try {
+    const razorpay = getRazorpayClient()
+    if (!razorpay) {
+      return res.status(500).json({ success: false, message: 'Razorpay is not configured.' })
+    }
+
     const MEMBERSHIP_FEE_PAISE = 59900   // ₹599 in paise (Razorpay uses smallest currency unit)
 
     const order = await razorpay.orders.create({

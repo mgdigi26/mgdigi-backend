@@ -86,72 +86,170 @@ router.get("/submissions", auth, async (req, res) => {
 
 // Approve submission + trigger commissions
 router.post("/submissions/:id/approve", auth, async (req, res) => {
-  const submission = await prisma.campaignEnrollment.update({
-    where: {
-      id: req.params.id,
-    },
-    data: {
-      status: "approved",
-      reviewedAt: new Date(),
-    },
-    include: {
-      user: true,
-      schedule: true,
-    },
+  const submissionId = req.params.id;
+
+  // ── Pre-flight: verify submission exists and fetch upline chain ─────────
+  // This read happens outside the transaction to avoid holding a DB connection
+  // during the upline traversal (up to 7 sequential queries).
+  // Concurrency safety for the critical write is enforced inside the transaction.
+  const preCheck = await prisma.campaignEnrollment.findUnique({
+    where: { id: submissionId },
+    include: { user: true, schedule: true },
   });
 
-  // Credit reward to the partner
-  await prisma.earningsWallet.update({
-    where: { userId: submission.userId },
-    data: {
-      balance: {
-        increment: submission.schedule.rewardAmt,
-      },
-      lifetime: {
-        increment: submission.schedule.rewardAmt,
-      },
-    },
-  });
+  if (!preCheck) {
+    return res.status(404).json({ error: "Submission not found" });
+  }
 
-  await prisma.transaction.create({
-    data: {
-      userId: submission.userId,
-      type: "campaign_reward",
-      amount: submission.schedule.rewardAmt,
-      referenceId: submission.id,
-      description: `${submission.schedule.name} reward approved`,
-    },
-  });
-  // Walk up 7 levels and credit points
-  let currentUserId = submission.userId;
+  // Early exit for the common non-concurrent case — avoids opening a transaction
+  // for submissions that are clearly already processed.
+  if (preCheck.status !== "pending") {
+    return res.status(400).json({
+      error: `Submission has already been ${preCheck.status}. Cannot approve again.`,
+    });
+  }
+
+  // Build upline chain outside the transaction (read-only, no locks needed).
+  const commissionOps = [];
+  let currentUserId = preCheck.userId;
   for (let level = 0; level < 7; level++) {
     const currentUser = await prisma.user.findUnique({
       where: { id: currentUserId },
     });
     if (!currentUser?.uplineId) break;
-
-    await prisma.pointsWallet.update({
-      where: { userId: currentUser.uplineId },
-      data: {
-        balance: { increment: LEVEL_POINTS[level] },
-        lifetime: { increment: LEVEL_POINTS[level] },
-      },
-    });
-
-    await prisma.transaction.create({
-      data: {
-        userId: currentUser.uplineId,
-        type: "referral_commission",
-        points: LEVEL_POINTS[level],
-        referenceId: submission.id,
-        description: `Level ${level + 1} commission from ${submission.user.name}`,
-      },
-    });
-
+    commissionOps.push({ uplineId: currentUser.uplineId, level });
     currentUserId = currentUser.uplineId;
   }
 
-  res.json({ success: true, submission });
+  // Snapshot values needed inside the transaction.
+  const partnerUserId = preCheck.userId;
+  const partnerName = preCheck.user.name;
+  const scheduleName = preCheck.schedule.name;
+  const rewardAmt = preCheck.schedule.rewardAmt;
+  const pointsRequired = preCheck.schedule.pointsReq ?? 0;
+
+  try {
+    // ── Interactive transaction ────────────────────────────────────────────
+    // Uses an async callback so we can perform conditional logic (status check,
+    // balance check) inside the same database transaction context.
+    // If any throw() is called, Prisma rolls back every write in this callback.
+    const approvedEnrollment = await prisma.$transaction(async (tx) => {
+      const now = new Date();
+
+      // ── Step 1: Conditional status update ─────────────────────
+      // updateMany with a status filter is the concurrency lock.
+      // Only one concurrent request can satisfy { id, status: "pending" }.
+      // The losing request gets count: 0 and the transaction is aborted.
+      const statusUpdate = await tx.campaignEnrollment.updateMany({
+        where: { id: submissionId, status: "pending" },
+        data: { status: "approved", reviewedAt: now },
+      });
+
+      if (statusUpdate.count === 0) {
+        // Another request already approved (or rejected) this submission.
+        throw new Error("ALREADY_PROCESSED");
+      }
+
+      // ── Step 2: Re-read partner's PointsWallet inside the transaction ──
+      // This read is now part of the same transaction snapshot, preventing
+      // a concurrent approval from seeing a stale balance.
+      const wallet = await tx.pointsWallet.findUnique({
+        where: { userId: partnerUserId },
+      });
+
+      const currentBalance = wallet?.balance ?? 0;
+
+      if (currentBalance < pointsRequired) {
+        // Throws to roll back the status update above — nothing is committed.
+        throw new Error("INSUFFICIENT_POINTS");
+      }
+
+      // ── Step 3: Deduct partner's Marketing Points (balance only) ──────
+      await tx.pointsWallet.update({
+        where: { userId: partnerUserId },
+        data: { balance: { decrement: pointsRequired } },
+      });
+
+      // ── Step 4: Credit earnings reward to partner ─────────────
+      await tx.earningsWallet.update({
+        where: { userId: partnerUserId },
+        data: {
+          balance: { increment: rewardAmt },
+          lifetime: { increment: rewardAmt },
+        },
+      });
+
+      // ── Step 5: Campaign reward Transaction record ─────────────
+      await tx.transaction.create({
+        data: {
+          userId: partnerUserId,
+          type: "campaign_reward",
+          amount: rewardAmt,
+          points: 0,
+          referenceId: submissionId,
+          description: `${scheduleName} reward approved`,
+        },
+      });
+
+      // ── Step 6: Marketing Points debit Transaction record ──────
+      // points is negative to represent a deduction; amount stays 0.
+      await tx.transaction.create({
+        data: {
+          userId: partnerUserId,
+          type: "campaign_points_debit",
+          amount: 0,
+          points: -pointsRequired,
+          referenceId: submissionId,
+          description: `${scheduleName} campaign points deducted`,
+        },
+      });
+
+      // ── Step 7: Upline commissions — balance + lifetime + Transaction ──
+      // LEVEL_POINTS and commission logic are unchanged.
+      for (const { uplineId, level } of commissionOps) {
+        await tx.pointsWallet.update({
+          where: { userId: uplineId },
+          data: {
+            balance: { increment: LEVEL_POINTS[level] },
+            lifetime: { increment: LEVEL_POINTS[level] },
+          },
+        });
+
+        await tx.transaction.create({
+          data: {
+            userId: uplineId,
+            type: "referral_commission",
+            amount: 0,
+            points: LEVEL_POINTS[level],
+            referenceId: submissionId,
+            description: `Level ${level + 1} commission from ${partnerName}`,
+          },
+        });
+      }
+
+      // Return the fully-updated enrollment for the response.
+      return tx.campaignEnrollment.findUnique({
+        where: { id: submissionId },
+        include: { user: true, schedule: true },
+      });
+    }); // end $transaction
+
+    res.json({ success: true, submission: approvedEnrollment });
+  } catch (e) {
+    if (e.message === "ALREADY_PROCESSED") {
+      return res.status(400).json({
+        error: "Submission has already been processed. Cannot approve again.",
+      });
+    }
+    if (e.message === "INSUFFICIENT_POINTS") {
+      return res.status(400).json({
+        error: "Insufficient marketing points to approve this campaign.",
+        required: pointsRequired,
+      });
+    }
+    console.error("[submissions/approve]", e);
+    res.status(500).json({ error: "Server error during approval." });
+  }
 });
 
 // Reject submission

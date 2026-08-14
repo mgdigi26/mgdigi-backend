@@ -350,21 +350,314 @@ router.put("/users/:id", auth, async (req, res) => {
 });
 // Approve withdrawal
 router.post("/withdrawals/:id/approve", auth, async (req, res) => {
-  const withdrawal = await prisma.withdrawal.findUnique({
-    where: { id: req.params.id },
-  });
+  const withdrawalId = req.params.id;
 
-  await prisma.earningsWallet.update({
-    where: { userId: withdrawal.userId },
-    data: { balance: { decrement: withdrawal.grossAmount } },
-  });
+  try {
+    const result = await prisma.$transaction(
+      async (tx) => {
+        // Lock the withdrawal logically by changing only a pending record.
+        // This prevents the same withdrawal from being approved twice.
+        const statusUpdate = await tx.withdrawal.updateMany({
+          where: {
+            id: withdrawalId,
+            status: "pending",
+          },
+          data: {
+            status: "paid",
+            paidAt: new Date(),
+          },
+        });
 
-  await prisma.withdrawal.update({
-    where: { id: req.params.id },
-    data: { status: "paid", paidAt: new Date() },
-  });
+        if (statusUpdate.count === 0) {
+          throw new Error("WITHDRAWAL_ALREADY_PROCESSED");
+        }
 
-  res.json({ success: true });
+        const withdrawal = await tx.withdrawal.findUnique({
+          where: { id: withdrawalId },
+        });
+
+        if (!withdrawal) {
+          throw new Error("WITHDRAWAL_NOT_FOUND");
+        }
+
+        // 1. Deduct the gross withdrawal amount from the partner's
+        //    Earnings Wallet.
+        await tx.earningsWallet.update({
+          where: {
+            userId: withdrawal.userId,
+          },
+          data: {
+            balance: {
+              decrement: withdrawal.grossAmount,
+            },
+          },
+        });
+
+        // Record the actual withdrawal payment.
+        await tx.transaction.create({
+          data: {
+            userId: withdrawal.userId,
+            type: "withdrawal_paid",
+            amount: withdrawal.grossAmount,
+            points: 0,
+            referenceId: withdrawal.id,
+            description: "Withdrawal approved and marked as paid",
+          },
+        });
+
+        // ------------------------------------------------------------
+        // ₹6,000 WITHDRAWAL CYCLE
+        // ------------------------------------------------------------
+
+        // Total amount of all paid withdrawals, including this one.
+        const paidTotals = await tx.withdrawal.aggregate({
+          where: {
+            status: "paid",
+          },
+          _sum: {
+            grossAmount: true,
+          },
+        });
+
+        const totalPaidWithdrawals = Number(paidTotals._sum.grossAmount || 0);
+
+        // Amount already consumed by completed ₹6,000 cycles.
+        const cycleTotals = await tx.transaction.aggregate({
+          where: {
+            type: "withdrawal_cycle",
+          },
+          _sum: {
+            amount: true,
+          },
+        });
+
+        const totalConsumedByCycles = Number(cycleTotals._sum.amount || 0);
+
+        const currentCycleAmount = totalPaidWithdrawals - totalConsumedByCycles;
+
+        // Normally this will be 0 or 1 because individual withdrawals
+        // cannot exceed ₹6,000.
+        const completedCycles = Math.floor(currentCycleAmount / 6000);
+
+        if (completedCycles > 0) {
+          // ----------------------------------------------------------
+          // Find partner's existing 7-level upline chain.
+          // Same structure as the existing referral flow.
+          // ----------------------------------------------------------
+          const commissionOps = [];
+
+          let currentUserId = withdrawal.userId;
+
+          for (let level = 0; level < 7; level++) {
+            const currentUser = await tx.user.findUnique({
+              where: {
+                id: currentUserId,
+              },
+              select: {
+                uplineId: true,
+              },
+            });
+
+            if (!currentUser?.uplineId) {
+              break;
+            }
+
+            commissionOps.push({
+              uplineId: currentUser.uplineId,
+              level,
+            });
+
+            currentUserId = currentUser.uplineId;
+          }
+
+          const LEVEL_POINTS = [100, 30, 15, 15, 20, 30, 50];
+
+          // Total points actually distributed through available uplines.
+          let distributedToUplines = 0;
+
+          // ----------------------------------------------------------
+          // Each completed ₹6,000 cycle creates exactly 599 points.
+          // ----------------------------------------------------------
+          for (let cycle = 0; cycle < completedCycles; cycle++) {
+            // Partner pays/debits 599 Marketing Points.
+            await tx.pointsWallet.upsert({
+              where: {
+                userId: withdrawal.userId,
+              },
+              create: {
+                userId: withdrawal.userId,
+                balance: -599,
+                lifetime: 0,
+              },
+              update: {
+                balance: {
+                  decrement: 599,
+                },
+              },
+            });
+
+            await tx.transaction.create({
+              data: {
+                userId: withdrawal.userId,
+                type: "withdrawal_cycle_debit",
+                amount: 0,
+                points: -599,
+                referenceId: withdrawal.id,
+                description:
+                  "599 Marketing Points debited for ₹6,000 withdrawal cycle",
+              },
+            });
+
+            // --------------------------------------------------------
+            // Existing 7-level commission structure
+            // --------------------------------------------------------
+            for (const { uplineId, level } of commissionOps) {
+              const points = LEVEL_POINTS[level];
+
+              await tx.pointsWallet.upsert({
+                where: {
+                  userId: uplineId,
+                },
+                create: {
+                  userId: uplineId,
+                  balance: points,
+                  lifetime: points,
+                },
+                update: {
+                  balance: {
+                    increment: points,
+                  },
+                  lifetime: {
+                    increment: points,
+                  },
+                },
+              });
+
+              await tx.transaction.create({
+                data: {
+                  userId: uplineId,
+                  type: "referral_commission",
+                  amount: 0,
+                  points,
+                  referenceId: withdrawal.id,
+                  description: `Withdrawal cycle Level ${level + 1} commission`,
+                },
+              });
+
+              distributedToUplines += points;
+            }
+
+            // --------------------------------------------------------
+            // Remaining points go to MG DIGI Admin.
+            //
+            // If all 7 levels exist:
+            // 599 - 260 = 339
+            //
+            // If fewer levels exist, the undistributed amount also
+            // remains with Admin, ensuring the full 599 is accounted for.
+            // --------------------------------------------------------
+            const adminPoints = 599 - distributedToUplines;
+
+            const admin = await tx.user.findFirst({
+              where: {
+                role: "admin",
+              },
+              select: {
+                id: true,
+              },
+            });
+
+            if (!admin) {
+              throw new Error("ADMIN_USER_NOT_FOUND");
+            }
+
+            await tx.pointsWallet.upsert({
+              where: {
+                userId: admin.id,
+              },
+              create: {
+                userId: admin.id,
+                balance: adminPoints,
+                lifetime: adminPoints,
+              },
+              update: {
+                balance: {
+                  increment: adminPoints,
+                },
+                lifetime: {
+                  increment: adminPoints,
+                },
+              },
+            });
+
+            await tx.transaction.create({
+              data: {
+                userId: admin.id,
+                type: "withdrawal_cycle_admin",
+                amount: 0,
+                points: adminPoints,
+                referenceId: withdrawal.id,
+                description:
+                  "Remaining Marketing Points from ₹6,000 withdrawal cycle",
+              },
+            });
+
+            // Mark exactly ₹6,000 as consumed.
+            await tx.transaction.create({
+              data: {
+                userId: withdrawal.userId,
+                type: "withdrawal_cycle",
+                amount: 6000,
+                points: 0,
+                referenceId: withdrawal.id,
+                description: "Completed ₹6,000 withdrawal cycle",
+              },
+            });
+
+            // Reset for calculating the next possible cycle in this
+            // transaction.
+            distributedToUplines = 0;
+          }
+        }
+
+        return {
+          success: true,
+          withdrawalId: withdrawal.id,
+          cycleAmount: currentCycleAmount,
+          completedCycles,
+        };
+      },
+      {
+        isolationLevel: "Serializable",
+      },
+    );
+
+    res.json(result);
+  } catch (err) {
+    console.error("[withdrawal approval]", err);
+
+    if (err.message === "WITHDRAWAL_ALREADY_PROCESSED") {
+      return res.status(400).json({
+        error: "Withdrawal has already been processed.",
+      });
+    }
+
+    if (err.message === "WITHDRAWAL_NOT_FOUND") {
+      return res.status(404).json({
+        error: "Withdrawal not found.",
+      });
+    }
+
+    if (err.message === "ADMIN_USER_NOT_FOUND") {
+      return res.status(500).json({
+        error: "Admin account not found.",
+      });
+    }
+
+    res.status(500).json({
+      error: "Unable to approve withdrawal.",
+    });
+  }
 });
 // ── GET SINGLE USER ───────────────────────────────────────────
 router.get("/users/:id", auth, async (req, res) => {

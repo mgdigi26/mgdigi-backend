@@ -2,7 +2,21 @@ const express = require("express");
 const router = express.Router();
 const { PrismaClient } = require("@prisma/client");
 const jwt = require("jsonwebtoken");
+const { createClient } = require("@supabase/supabase-js");
+const ws = require("ws");
+
 const prisma = new PrismaClient();
+
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY,
+  {
+    global: {
+      fetch: fetch,
+      WebSocket: ws,
+    },
+  },
+);
 
 const LEVEL_POINTS = [100, 30, 15, 15, 20, 30, 50];
 
@@ -16,6 +30,49 @@ function auth(req, res, next) {
     next();
   } catch {
     res.status(401).json({ error: "Invalid token" });
+  }
+}
+async function getFreshProofUrl(storedUrl) {
+  if (!storedUrl) return null;
+
+  try {
+    let storagePath = storedUrl;
+
+    if (storedUrl.startsWith("http")) {
+      const marker = "/storage/v1/object/sign/proof-uploads/";
+
+      const markerIndex = storedUrl.indexOf(marker);
+
+      if (markerIndex !== -1) {
+        storagePath = storedUrl.substring(markerIndex + marker.length);
+
+        storagePath = storagePath.split("?")[0];
+
+        storagePath = decodeURIComponent(storagePath);
+      }
+    }
+
+    const { data, error } = await supabase.storage
+      .from("proof-uploads")
+      .createSignedUrl(storagePath, 60 * 60);
+
+    if (error) {
+      console.error(
+        "[admin/submissions] Could not refresh proof URL:",
+        error.message,
+      );
+
+      return storedUrl;
+    }
+
+    return data?.signedUrl || storedUrl;
+  } catch (error) {
+    console.error(
+      "[admin/submissions] Proof URL refresh error:",
+      error.message,
+    );
+
+    return storedUrl;
   }
 }
 
@@ -58,24 +115,25 @@ router.get("/submissions", auth, async (req, res) => {
       },
     });
 
-    const formatted = submissions.map((item) => ({
-      id: item.id,
-      status: item.status,
-      screenshotUrl: item.screenshotUrl,
-      submittedAt: item.submittedAt,
-      reviewedAt: item.reviewedAt,
-      rejectReason: item.rejectReason,
+    const formatted = await Promise.all(
+      submissions.map(async (item) => ({
+        id: item.id,
+        status: item.status,
+        screenshotUrl: await getFreshProofUrl(item.screenshotUrl),
+        submittedAt: item.submittedAt,
+        reviewedAt: item.reviewedAt,
+        rejectReason: item.rejectReason,
 
-      user: item.user,
+        user: item.user,
 
-      campaign: {
-        id: item.schedule.id,
-        name: item.schedule.name,
-        type: item.schedule.type,
-      },
-
-      dayNumber: item.dayNumber,
-    }));
+        campaign: {
+          id: item.schedule.id,
+          name: item.schedule.name,
+          type: item.schedule.type,
+        },
+        dayNumber: item.dayNumber,
+      })),
+    );
 
     res.json(formatted);
   } catch (err) {

@@ -35,10 +35,12 @@ model User {
   kycStatus     String   @default("pending")
   panNumber     String?
   aadhaarLast4  String?
-  bankAccount   String?
-  bankIfsc      String?
-  bankName      String?
+  bankAccount      String?
+  bankIfsc         String?
+  bankName         String?
   accountHolderName String?
+  bankVerified     Boolean  @default(false)
+  bankVerifiedAt   DateTime?
   role          String   @default("partner")
   status        String   @default("active")
   warnings      Int      @default(0)

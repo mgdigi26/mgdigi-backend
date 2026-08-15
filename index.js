@@ -18,6 +18,7 @@ app.use("/api/campaigns", require("./routes/campaigns"));
 app.use("/api/submissions", require("./routes/submissions"));
 app.use("/api/wallet", require("./routes/wallet"));
 app.use("/api/withdrawals", require("./routes/withdrawals"));
+app.use("/api/bank", require("./routes/bank"));
 app.use("/api/team", require("./routes/team"));
 app.use("/api/admin", require("./routes/admin"));
 app.use("/api/activity", require("./routes/activity"));

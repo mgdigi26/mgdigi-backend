@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const { PrismaClient } = require("@prisma/client");
 const jwt = require("jsonwebtoken");
+const crypto = require("crypto");
 
 const prisma = new PrismaClient();
 
@@ -13,6 +14,28 @@ function verifyToken(req) {
   } catch {
     return null;
   }
+}
+
+function generateCashfreeSignature() {
+  const clientId = process.env.CASHFREE_SECURE_ID;
+  const publicKey = process.env.CASHFREE_SECURE_PUBLIC_KEY;
+
+  if (!clientId || !publicKey) {
+    throw new Error("Cashfree Secure ID public key configuration is missing.");
+  }
+
+  const timestamp = Math.floor(Date.now() / 1000);
+  const data = `${clientId}.${timestamp}`;
+
+  const encrypted = crypto.publicEncrypt(
+    {
+      key: publicKey,
+      padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+    },
+    Buffer.from(data, "utf8"),
+  );
+
+  return encrypted.toString("base64");
 }
 
 // GET saved bank details
@@ -113,6 +136,8 @@ router.post("/verify", async (req, res) => {
       });
     }
 
+    const cashfreeSignature = generateCashfreeSignature();
+
     const cashfreeResponse = await fetch(
       "https://api.cashfree.com/verification/bank-account/sync",
       {
@@ -121,6 +146,7 @@ router.post("/verify", async (req, res) => {
           "Content-Type": "application/json",
           "x-client-id": process.env.CASHFREE_SECURE_ID,
           "x-client-secret": process.env.CASHFREE_SECURE_SECRET,
+          "x-cf-signature": cashfreeSignature,
         },
         body: JSON.stringify({
           bank_account: account,

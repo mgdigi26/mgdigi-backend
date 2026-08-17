@@ -717,6 +717,61 @@ router.post("/withdrawals/:id/approve", auth, async (req, res) => {
     });
   }
 });
+
+// Reject withdrawal
+router.post("/withdrawals/:id/reject", auth, async (req, res) => {
+  const withdrawalId = req.params.id;
+
+  try {
+    const result = await prisma.withdrawal.updateMany({
+      where: {
+        id: withdrawalId,
+        status: "pending",
+      },
+      data: {
+        status: "rejected",
+      },
+    });
+
+    if (result.count === 0) {
+      const withdrawal = await prisma.withdrawal.findUnique({
+        where: { id: withdrawalId },
+        select: {
+          id: true,
+          status: true,
+        },
+      });
+
+      if (!withdrawal) {
+        return res.status(404).json({
+          error: "Withdrawal not found.",
+        });
+      }
+
+      return res.status(400).json({
+        error: "Withdrawal has already been processed.",
+      });
+    }
+
+    console.log("[withdrawal rejection]", {
+      withdrawalId,
+      adminId: req.user?.userId || null,
+    });
+
+    return res.json({
+      success: true,
+      withdrawalId,
+      status: "rejected",
+    });
+  } catch (err) {
+    console.error("[withdrawal rejection]", err);
+
+    return res.status(500).json({
+      error: "Unable to reject withdrawal.",
+    });
+  }
+});
+
 // ── GET SINGLE USER ───────────────────────────────────────────
 router.get("/users/:id", auth, async (req, res) => {
   try {
